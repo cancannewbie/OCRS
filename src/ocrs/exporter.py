@@ -418,8 +418,9 @@ def _write_locked(orders: list[dict[str, Any]], destination: Path) -> ExportMeta
         if _existing_snapshot(destination, digest):
             return metadata
         _publish(final, destination, digest)
-        if os.name == "posix":
-            directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        directory_flag = getattr(os, "O_DIRECTORY", None)
+        if os.name == "posix" and directory_flag is not None:
+            directory_fd = os.open(destination.parent, os.O_RDONLY | directory_flag)
             try:
                 os.fsync(directory_fd)
             finally:
