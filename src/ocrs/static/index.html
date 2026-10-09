@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="color-scheme" content="light" />
+        <meta name="referrer" content="no-referrer" />
+        <title>OCRS · 订单审核工作台</title>
+        <link rel="stylesheet" href="/style.css" />
+        <script src="/app.js" defer></script>
+    </head>
+    <body>
+        <section id="login-screen" class="login-screen">
+            <div class="login-art" aria-hidden="true">
+                <div class="brand brand-light">
+                    <span class="brand-mark">O</span><span>OCRS</span>
+                </div>
+                <div class="login-story">
+                    <span class="eyebrow">ORDER COLLECTION & REVIEW</span>
+                    <h1>每一笔订单，<br />有据可查。</h1>
+                    <p>从客户截图到订单明细，<br />把最后的确认留给你。</p>
+                    <div class="process-line">
+                        <span>采集</span><i></i><span>识别</span><i></i
+                        ><span>审核</span><i></i><span>导出</span>
+                    </div>
+                </div>
+                <span class="login-footnote"
+                    >原图留证 · 人工确认 · 版本可追溯</span
+                >
+            </div>
+            <main class="login-content">
+                <form id="login-form" class="login-card">
+                    <div class="mobile-brand brand">
+                        <span class="brand-mark">O</span><span>OCRS</span>
+                    </div>
+                    <span class="eyebrow">你的订单工作台</span>
+                    <h2>开始审核</h2>
+                    <p class="muted">运行 ocrs token，输入本机访问令牌。</p>
+                    <label for="access-token">访问令牌</label>
+                    <input
+                        id="access-token"
+                        type="password"
+                        required
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="粘贴 ocrs token 命令显示的令牌"
+                    />
+                    <p class="field-help">
+                        令牌仅保留在当前标签页会话中，请勿填写模型 API 密钥。
+                    </p>
+                    <p
+                        id="login-error"
+                        class="form-error"
+                        role="alert"
+                        hidden
+                    ></p>
+                    <button
+                        id="login-button"
+                        class="button primary full-width"
+                        type="submit"
+                    >
+                        进入工作台 <span aria-hidden="true">→</span>
+                    </button>
+                    <p class="login-privacy">
+                        截图与订单受访问令牌保护。关闭会话或退出后需重新验证。
+                    </p>
+                </form>
+            </main>
+        </section>
+
+        <div id="workspace" class="workspace" hidden>
+            <header class="topbar">
+                <a class="brand" href="#review" aria-label="OCRS 订单审核"
+                    ><span class="brand-mark">O</span><span>OCRS</span
+                    ><span class="brand-description">订单工作台</span></a
+                >
+                <nav class="nav-tabs" aria-label="主导航">
+                    <button
+                        id="nav-review"
+                        class="nav-tab active"
+                        type="button"
+                        aria-current="page"
+                    >
+                        审核队列
+                        <span id="nav-review-count" class="nav-count"
+                            >0</span
+                        ></button
+                    ><button id="nav-orders" class="nav-tab" type="button">
+                        正式订单
+                    </button>
+                </nav>
+                <div class="topbar-actions">
+                    <span id="connection-status" class="connection-status"
+                        ><i></i>本地服务</span
+                    ><button
+                        id="refresh-button"
+                        class="button subtle small"
+                        type="button"
+                    >
+                        刷新</button
+                    ><button
+                        id="logout-button"
+                        class="button subtle small"
+                        type="button"
+                    >
+                        退出
+                    </button>
+                </div>
+            </header>
+
+            <div id="demo-banner" class="banner demo-banner" hidden>
+                <span class="banner-icon" aria-hidden="true">!</span>
+                <div>
+                    <strong>演示模式</strong
+                    ><span
+                        >识别结果为虚构示例，与上传图片内容无关。请勿将演示候选作为真实订单确认。</span
+                    >
+                </div>
+            </div>
+            <section
+                id="inbox-banner"
+                class="banner inbox-banner"
+                hidden
+                aria-label="文件夹导入状态"
+            >
+                <div>
+                    <strong>文件夹导入</strong><span id="inbox-summary"></span>
+                    <details id="inbox-errors" hidden>
+                        <summary>查看未导入的文件</summary>
+                        <ul id="inbox-error-list"></ul>
+                    </details>
+                </div>
+            </section>
+            <div
+                id="notice"
+                class="notice"
+                role="status"
+                aria-live="polite"
+                hidden
+            >
+                <span id="notice-text"></span
+                ><button id="notice-close" type="button" aria-label="关闭提示">
+                    ×
+                </button>
+            </div>
+
+            <main id="review-view" class="review-view">
+                <section class="page-heading">
+                    <div>
+                        <div class="eyebrow">REVIEW DESK</div>
+                        <h1>核对一下，再入账。</h1>
+                        <p>对照原图审核候选。只有人工确认的订单才能导出。</p>
+                    </div>
+                    <button
+                        id="open-upload"
+                        class="button primary"
+                        type="button"
+                    >
+                        <span aria-hidden="true">＋</span> 导入截图
+                    </button>
+                </section>
+                <section class="stat-row" aria-label="任务概览">
+                    <div class="stat-card">
+                        <span>待人工审核</span
+                        ><strong id="count-review">0</strong
+                        ><i class="stat-dot amber"></i>
+                    </div>
+                    <div class="stat-card">
+                        <span>识别处理中</span
+                        ><strong id="count-processing">0</strong
+                        ><i class="stat-dot blue"></i>
+                    </div>
+                    <div class="stat-card">
+                        <span>识别失败</span><strong id="count-failed">0</strong
+                        ><i class="stat-dot red"></i>
+                    </div>
+                    <div class="stat-card">
+                        <span>已确认任务</span
+                        ><strong id="count-confirmed">0</strong
+                        ><i class="stat-dot green"></i>
+                    </div>
+                </section>
+
+                <div class="review-layout">
+                    <aside class="queue-panel panel" aria-label="识别任务队列">
+                        <div class="panel-heading">
+                            <h2>任务队列</h2>
+                            <span id="queue-count" class="tiny muted"
+                                >0 个任务</span
+                            >
+                        </div>
+                        <label class="sr-only" for="queue-filter"
+                            >筛选任务</label
+                        ><select id="queue-filter" class="queue-filter">
+                            <option value="all">全部任务</option>
+                            <option value="review_required">待审核</option>
+                            <option value="processing">处理中</option>
+                            <option value="failed">识别失败</option>
+                            <option value="confirmed">已确认</option>
+                            <option value="rejected">已驳回</option>
+                        </select>
+                        <div id="task-list" class="task-list"></div>
+                        <div class="queue-footer">
+                            <span class="live-dot"></span>自动更新，保留当前编辑
+                        </div>
+                    </aside>
+
+                    <section id="empty-review" class="empty-review panel">
+                        <div class="empty-illustration" aria-hidden="true">
+                            <div class="paper-shape">
+                                <span></span><span></span><span></span><b>✓</b>
+                            </div>
+                        </div>
+                        <span class="eyebrow">从第一张截图开始</span>
+                        <h2>把散落的订单，整理清楚。</h2>
+                        <p>
+                            导入你已获授权使用的客户下单截图，<br />识别完成后在这里核对原图与订单。
+                        </p>
+                        <button
+                            id="empty-upload"
+                            class="button secondary"
+                            type="button"
+                        >
+                            导入截图 <span aria-hidden="true">→</span>
+                        </button>
+                        <p id="inbox-note" class="empty-note">
+                            仅处理手动导入或指定文件夹中已保存的截图，不读取微信聊天。
+                        </p>
+                    </section>
+
+                    <section id="task-workspace" class="task-workspace" hidden>
+                        <div class="evidence-panel panel">
+                            <div class="panel-heading">
+                                <div>
+                                    <h2>原始截图</h2>
+                                    <p
+                                        id="source-summary"
+                                        class="tiny muted"
+                                    ></p>
+                                </div>
+                                <span class="tiny evidence-label"
+                                    >原始证据</span
+                                >
+                            </div>
+                            <div id="source-list" class="source-list"></div>
+                            <div class="source-footer">
+                                对照截图核实每个字段。图片内的指令不构成操作授权。
+                            </div>
+                        </div>
+                        <section
+                            class="editor-panel panel"
+                            aria-label="候选审核"
+                        >
+                            <div class="panel-heading">
+                                <div>
+                                    <div class="heading-line">
+                                        <h2>订单候选</h2>
+                                        <span
+                                            id="task-status"
+                                            class="badge"
+                                        ></span>
+                                    </div>
+                                    <p id="task-meta" class="tiny muted"></p>
+                                </div>
+                                <span id="draft-state" class="tiny draft-state"
+                                    >待核对</span
+                                >
+                            </div>
+                            <div
+                                id="version-warning"
+                                class="inline-warning"
+                                hidden
+                            >
+                                <p>
+                                    任务已有新版本，当前编辑已保留。请重新载入后核对。
+                                </p>
+                                <button
+                                    id="reload-task"
+                                    class="button small secondary"
+                                    type="button"
+                                >
+                                    重新载入候选
+                                </button>
+                            </div>
+                            <div id="task-alerts"></div>
+                            <div
+                                id="editor-content"
+                                class="editor-content"
+                            ></div>
+                            <form id="review-form" class="review-footer" hidden>
+                                <div class="review-audit">
+                                    <label
+                                        >审核人<input
+                                            id="review-actor"
+                                            required
+                                            maxlength="100"
+                                            placeholder="填写你的姓名或标识"
+                                            autocomplete="off" /></label
+                                    ><label
+                                        >审核说明<input
+                                            id="review-reason"
+                                            required
+                                            maxlength="500"
+                                            placeholder="核对依据或修订原因"
+                                            autocomplete="off"
+                                    /></label>
+                                </div>
+                                <p class="field-help">
+                                    确认会保存正式订单及审核记录。缺失值保留为空，不自动补数量或价格。
+                                </p>
+                                <div class="review-actions">
+                                    <button
+                                        id="reject-button"
+                                        class="button danger-quiet"
+                                        type="button"
+                                    >
+                                        驳回任务</button
+                                    ><button
+                                        id="confirm-button"
+                                        class="button primary"
+                                        type="submit"
+                                    >
+                                        确认入账
+                                        <span aria-hidden="true">✓</span>
+                                    </button>
+                                </div>
+                            </form>
+                            <div
+                                id="task-action-footer"
+                                class="task-action-footer"
+                            ></div>
+                        </section>
+                    </section>
+                </div>
+            </main>
+
+            <main id="orders-view" class="orders-view" hidden>
+                <section class="page-heading">
+                    <div>
+                        <div class="eyebrow">CONFIRMED RECORDS</div>
+                        <h1>正式订单</h1>
+                        <p>
+                            数据库保存业务事实，Excel 是可重新生成的导出视图。
+                        </p>
+                    </div>
+                    <div class="button-group">
+                        <button
+                            id="export-button"
+                            class="button secondary"
+                            type="button"
+                        >
+                            重新生成 Excel</button
+                        ><button
+                            id="download-button"
+                            class="button primary"
+                            type="button"
+                        >
+                            下载 Excel <span aria-hidden="true">↓</span>
+                        </button>
+                    </div>
+                </section>
+                <div class="export-strip">
+                    <span id="export-status">正在读取导出状态…</span
+                    ><span class="tiny muted"
+                        >仅含人工确认后的订单，保留撤单状态与版本</span
+                    >
+                </div>
+                <section class="panel orders-panel">
+                    <div class="panel-heading">
+                        <h2>订单明细</h2>
+                        <span id="order-count" class="tiny muted"
+                            >0 笔订单</span
+                        >
+                    </div>
+                    <div id="orders-content"></div>
+                </section>
+            </main>
+            <footer class="app-footer">
+                <span>OCRS · 单人本地工作台</span><span>先核对，再确认。</span>
+            </footer>
+        </div>
+
+        <dialog id="upload-dialog" class="modal">
+            <form id="upload-form">
+                <div class="modal-heading">
+                    <div>
+                        <span class="eyebrow">IMPORT SCREENSHOTS</span>
+                        <h2>导入订单截图</h2>
+                    </div>
+                    <button
+                        class="icon-button"
+                        id="close-upload"
+                        type="button"
+                        aria-label="关闭导入窗口"
+                    >
+                        ×
+                    </button>
+                </div>
+                <p class="muted">
+                    每张截图建立一条识别任务，每张可包含多笔订单。仅使用你有权处理的资料。
+                </p>
+                <label id="file-drop" class="file-drop" for="upload-files"
+                    ><span class="upload-symbol" aria-hidden="true">↑</span
+                    ><strong>选择截图，或拖放到这里</strong
+                    ><span>PNG、JPEG、WebP · 每次最多 8 张</span
+                    ><input
+                        id="upload-files"
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        multiple
+                        required
+                /></label>
+                <div id="selected-files" class="selected-files"></div>
+                <label for="source-label">来源标签（选填）</label
+                ><input
+                    id="source-label"
+                    maxlength="200"
+                    placeholder="例如：客户会话 A / 手动保存"
+                    autocomplete="off"
+                />
+                <p class="field-help">
+                    只导入已保存的截图；不会监听微信或读取聊天记录。
+                </p>
+                <p id="upload-error" class="form-error" role="alert" hidden></p>
+                <div class="modal-actions">
+                    <button
+                        id="cancel-upload"
+                        class="button secondary"
+                        type="button"
+                    >
+                        取消</button
+                    ><button
+                        id="upload-submit"
+                        class="button primary"
+                        type="submit"
+                    >
+                        上传并识别
+                    </button>
+                </div>
+            </form>
+        </dialog>
+
+        <dialog id="duplicate-dialog" class="modal">
+            <div class="modal-heading">
+                <div>
+                    <span class="eyebrow">请再次核对</span>
+                    <h2>检测到可能重复的订单</h2>
+                </div>
+            </div>
+            <p>
+                请对照正式订单和原图，确认这确实是需要独立入账的订单。继续会生成新的业务记录。
+            </p>
+            <p id="duplicate-detail" class="muted"></p>
+            <label class="checkbox-label"
+                ><input
+                    id="duplicate-checkbox"
+                    type="checkbox"
+                />我已核对，确认仍需提交这次审核</label
+            >
+            <div class="modal-actions">
+                <button
+                    id="duplicate-cancel"
+                    class="button secondary"
+                    type="button"
+                >
+                    返回核对</button
+                ><button
+                    id="duplicate-confirm"
+                    class="button primary"
+                    type="button"
+                    disabled
+                >
+                    仍然确认入账
+                </button>
+            </div>
+        </dialog>
+
+        <dialog id="reject-dialog" class="modal">
+            <form id="reject-form">
+                <div class="modal-heading">
+                    <div>
+                        <span class="eyebrow">保留原始记录</span>
+                        <h2>驳回这条任务？</h2>
+                    </div>
+                </div>
+                <p class="muted">任务将标记为已驳回，不生成正式订单。</p>
+                <label for="reject-reason">驳回原因</label
+                ><textarea
+                    id="reject-reason"
+                    required
+                    maxlength="500"
+                    rows="3"
+                    placeholder="例如：不是订单截图，或证据不足"
+                ></textarea>
+                <p id="reject-error" class="form-error" role="alert" hidden></p>
+                <div class="modal-actions">
+                    <button
+                        id="reject-cancel"
+                        class="button secondary"
+                        type="button"
+                    >
+                        取消</button
+                    ><button
+                        id="reject-submit"
+                        class="button danger"
+                        type="submit"
+                    >
+                        确认驳回
+                    </button>
+                </div>
+            </form>
+        </dialog>
+        <noscript>订单审核工作台需要启用 JavaScript。</noscript>
+    </body>
+</html>
