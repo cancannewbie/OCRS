@@ -42,7 +42,7 @@ class Confirmation(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=100)
     actor: str = Field(min_length=1, max_length=100)
     reason: str = Field(min_length=1, max_length=500)
-    events: list[CandidateEvent] = Field(min_length=1, max_length=20)
+    events: list[CandidateEvent] = Field(min_length=1, max_length=50)
     acknowledge_duplicates: bool = False
 
 

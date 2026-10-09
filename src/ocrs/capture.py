@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import stat
+import sys
 import threading
 import warnings
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from PIL import Image, UnidentifiedImageError
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_PIXELS = 20_000_000
+_WINDOWS = sys.platform == "win32"
 _FORMATS = {
     "PNG": ("image/png", ".png"),
     "JPEG": ("image/jpeg", ".jpg"),
@@ -118,6 +120,20 @@ def _unsafe_link(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(
         getattr(info, "st_file_attributes", 0)
         & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _matches_opened_file(path_info: os.stat_result, opened: os.stat_result) -> bool:
+    if not _WINDOWS:
+        return _signature(path_info) == _signature(opened)
+    # CPython 3.12+ Windows lstat reports creation time as ctime, while fstat
+    # reports change time. Compare like-for-like birth times across APIs; keep
+    # the full fd ctime separately for before/after read mutation detection.
+    birthtime = getattr(path_info, "st_birthtime_ns", None)
+    return (
+        _signature(path_info)[:-1] == _signature(opened)[:-1]
+        and birthtime is not None
+        and birthtime == getattr(opened, "st_birthtime_ns", None)
     )
 
 
@@ -261,20 +277,25 @@ class InboxWatcher:
             seen.complete = True
             summary["errors"].append({"filename": name, "code": "image_too_large"})
             return
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         file_fd = (
             os.open(name, flags, dir_fd=fd) if fd is not None else os.open(self.inbox / name, flags)
         )
         with os.fdopen(file_fd, "rb") as stream:
             opened = os.fstat(stream.fileno())
-            if not stat.S_ISREG(opened.st_mode) or _signature(opened) != signature:
+            if not stat.S_ISREG(opened.st_mode) or not _matches_opened_file(info, opened):
                 self._seen.pop(name, None)
                 summary["pending"] += 1
                 return
             data = stream.read(self.max_bytes + 1)
             after = os.fstat(stream.fileno())
         if (
-            _signature(after) != signature
+            _signature(after) != _signature(opened)
             or len(data) != info.st_size
             or _signature(self._stat_file(fd, name)) != signature
         ):

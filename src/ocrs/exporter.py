@@ -405,7 +405,8 @@ def _write_locked(orders: list[dict[str, Any]], destination: Path) -> ExportMeta
         workbook.save(raw)
         _canonicalize(raw, final)
         _verify(final, len(orders), item_count)
-        with final.open("rb") as stream:
+        # Windows _commit/fsync requires a writable descriptor.
+        with final.open("r+b") as stream:
             os.fsync(stream.fileno())
         digest = _sha256(final)
         metadata: ExportMetadata = {

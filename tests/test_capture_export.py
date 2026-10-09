@@ -8,6 +8,7 @@ import multiprocessing
 import os
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 from zipfile import ZipFile
@@ -199,7 +200,7 @@ def test_watcher_detects_file_swap_before_open(tmp_path: Path) -> None:
     original_open = os.open
 
     def swap_open(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-        if name == "drop.png":
+        if Path(name).name == "drop.png":
             path.unlink()
             path.write_bytes(image_bytes("JPEG"))
         return original_open(name, flags, *args, **kwargs)
@@ -221,7 +222,7 @@ def test_watcher_reports_unreadable_file_with_bounded_retries(tmp_path: Path) ->
 
     def denied_open(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         nonlocal attempts
-        if name == "drop.png":
+        if Path(name).name == "drop.png":
             attempts += 1
             raise PermissionError("Private path")
         return original_open(name, flags, *args, **kwargs)
@@ -282,6 +283,92 @@ def test_portable_fallback_rechecks_directory_after_read(
     result = watcher.scan_once()
     assert result["imported"] == 0
     assert result["errors"] == [{"filename": "", "code": "inbox_changed"}]
+
+
+def _windows_stat(info: os.stat_result, *, changed: int = 0) -> Any:
+    return SimpleNamespace(
+        st_dev=info.st_dev,
+        st_ino=info.st_ino,
+        st_mode=info.st_mode,
+        st_size=info.st_size,
+        st_mtime_ns=info.st_mtime_ns,
+        st_ctime_ns=1_000_000 + changed,
+        st_birthtime_ns=1_000_000,
+    )
+
+
+def test_windows_path_and_descriptor_ctime_have_distinct_meanings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "valid.png"
+    path.write_bytes(b"old")
+    imported: list[bytes] = []
+    watcher = InboxWatcher(tmp_path, lambda data, *_: imported.append(data))
+    original_stat = watcher._stat_file
+    original_fstat = os.fstat
+    monkeypatch.setattr("ocrs.capture._WINDOWS", True)
+    monkeypatch.setattr(os, "supports_fd", set())
+    monkeypatch.setattr(
+        watcher, "_stat_file", lambda fd, name: _windows_stat(original_stat(fd, name))
+    )
+    monkeypatch.setattr(os, "fstat", lambda fd: _windows_stat(original_fstat(fd), changed=500))
+    watcher.scan_once()
+    path.write_bytes(image_bytes())
+    assert watcher.scan_once()["pending"] == 1
+    assert watcher.scan_once()["imported"] == 1
+    assert imported == [image_bytes()]
+
+
+def test_windows_descriptor_change_time_still_detects_mutation_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "valid.png").write_bytes(image_bytes())
+    imported: list[bytes] = []
+    watcher = InboxWatcher(tmp_path, lambda data, *_: imported.append(data))
+    original_stat = watcher._stat_file
+    original_fstat = os.fstat
+    calls = 0
+
+    def changing_fstat(fd: int) -> Any:
+        nonlocal calls
+        calls += 1
+        return _windows_stat(original_fstat(fd), changed=calls)
+
+    monkeypatch.setattr("ocrs.capture._WINDOWS", True)
+    monkeypatch.setattr(os, "supports_fd", set())
+    monkeypatch.setattr(
+        watcher, "_stat_file", lambda fd, name: _windows_stat(original_stat(fd, name))
+    )
+    monkeypatch.setattr(os, "fstat", changing_fstat)
+    watcher.scan_once()
+    assert watcher.scan_once()["pending"] == 1
+    assert not imported
+    assert calls == 2
+
+
+def test_image_open_requests_binary_mode_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "valid.png").write_bytes(image_bytes())
+    imported: list[bytes] = []
+    watcher = InboxWatcher(tmp_path, lambda data, *_: imported.append(data))
+    original_open = os.open
+    native_binary = getattr(os, "O_BINARY", 0)
+    binary_flag = native_binary or 0x40000000
+
+    def binary_open(name: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        assert flags & binary_flag
+        return original_open(name, (flags & ~binary_flag) | native_binary, *args, **kwargs)
+
+    monkeypatch.setattr(os, "supports_fd", set())
+    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+    monkeypatch.setattr(os, "open", binary_open)
+    watcher.scan_once()
+    assert watcher.scan_once()["imported"] == 1
+    assert imported == [image_bytes()]
 
 
 def sheet_rows(path: Path, name: str) -> list[dict[str, Any]]:

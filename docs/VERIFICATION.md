@@ -3,7 +3,7 @@
 2026-10-09，使用完全虚构的数据和临时数据库，在隔离的 Python 3.12/Linux 工作区完成：
 
 - `uv run --locked ruff check .`、`ruff format --check .`、`mypy src` 通过。
-- `uv run --locked pytest -q`：200 项离线测试通过。包括模型契约、金额精度、图片校验、鉴权、上传、人工审核、并发/幂等、改单/撤单事务回滚、导出、备份恢复、过期证据清理。
+- `uv run --locked pytest -q`：204 项离线测试通过。包括模型契约、金额精度、图片校验、鉴权、上传、人工审核、并发/幂等、改单/撤单事务回滚、导出、备份恢复、过期证据清理。
 - `node --check src/ocrs/static/app.js` 通过。
 - `uv build` 生成 wheel 和源码包；静态页面随包发布。
 - 以 FastAPI TestClient 对实际应用执行上传、demo 候选、图像预览鉴权、提交审核 JSON、幂等确认和 XLSX 下载，结果符合接口契约。
