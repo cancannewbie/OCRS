@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ocrs"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local screenshot order collection and review"
 requires-python = ">=3.12,<3.14"
 dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "pydantic>=2.10,<3", "httpx>=0.28,<1", "Pillow>=11,<13", "openpyxl>=3.1,<4", "filelock>=3.17,<4", "python-multipart>=0.0.20,<1", "python-dotenv>=1,<2"]

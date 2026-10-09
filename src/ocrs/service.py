@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import time
 import uuid
@@ -72,51 +73,91 @@ class Service:
                 "UPDATE exports SET status='failed',error_code='INTERRUPTED' WHERE status='writing'"
             )
             db.execute("UPDATE outbox SET status='pending',export_id=NULL WHERE status='writing'")
+            # The service lock excludes other processes; this writer transaction
+            # also excludes ingestion while reconciling interrupted file writes.
+            retained = {row[0] for row in db.execute("SELECT path FROM sources")}
+            for path in (self.root / "images").iterdir():
+                if path.suffix not in {".png", ".jpg", ".webp"}:
+                    continue
+                try:
+                    generated = str(uuid.UUID(path.stem)) == path.stem
+                except ValueError:
+                    generated = False
+                if generated and f"images/{path.name}" not in retained and not path.is_dir():
+                    path.unlink(missing_ok=True)
 
     def ingest(self, data: bytes, filename: str, source_label: str) -> tuple[dict[str, Any], bool]:
         if not source_label.strip() or len(source_label) > 200 or len(filename) > 255:
             raise AppError("SOURCE_INVALID", "来源标签或文件名无效")
         image = validate_image(data, max_bytes=self.settings.max_upload_bytes)
-        with transaction(self.root) as db:
-            prior = db.execute(
-                (
-                    "SELECT t.id FROM tasks t JOIN sources s ON s.id=t.source_id "
-                    "WHERE s.digest=? AND s.source_label=?"
-                ),
-                (image.sha256, source_label),
-            ).fetchone()
-            if prior:
-                return self._task(db, prior["id"]), True
-            source_id, task_id = uid(), uid()
-            relative = f"images/{source_id}{image.extension}"
-            path = self.root / relative
-            path.write_bytes(data)
-            stamp = now()
-            db.execute(
-                (
-                    "INSERT INTO "
-                    "sources(id,digest,source_label,filename,mime,path,created_at) "
-                    "VALUES(?,?,?,?,?,?,?)"
-                ),
-                (
-                    source_id,
-                    image.sha256,
-                    source_label,
-                    Path(filename.replace("\\", "/")).name,
-                    image.mime,
-                    relative,
-                    stamp,
-                ),
-            )
-            db.execute(
-                (
-                    "INSERT INTO "
-                    "tasks(id,source_id,status,provider,created_at,updated_at) "
-                    "VALUES(?,?,'received',?,?,?)"
-                ),
-                (task_id, source_id, self.settings.provider, stamp, stamp),
-            )
-            return self._task(db, task_id), False
+        created_path: Path | None = None
+        try:
+            with transaction(self.root) as db:
+                prior = db.execute(
+                    (
+                        "SELECT t.id FROM tasks t JOIN sources s ON s.id=t.source_id "
+                        "WHERE s.digest=? AND s.source_label=?"
+                    ),
+                    (image.sha256, source_label),
+                ).fetchone()
+                if prior:
+                    return self._task(db, prior["id"]), True
+                source_id, task_id = uid(), uid()
+                relative = f"images/{source_id}{image.extension}"
+                path = self.root / relative
+                with path.open("xb") as stream:
+                    created_path = path
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                directory_flag = getattr(os, "O_DIRECTORY", None)
+                if os.name == "posix" and directory_flag is not None:
+                    descriptor = os.open(path.parent, os.O_RDONLY | directory_flag)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                stamp = now()
+                db.execute(
+                    (
+                        "INSERT INTO "
+                        "sources(id,digest,source_label,filename,mime,path,created_at) "
+                        "VALUES(?,?,?,?,?,?,?)"
+                    ),
+                    (
+                        source_id,
+                        image.sha256,
+                        source_label,
+                        Path(filename.replace("\\", "/")).name,
+                        image.mime,
+                        relative,
+                        stamp,
+                    ),
+                )
+                db.execute(
+                    (
+                        "INSERT INTO "
+                        "tasks(id,source_id,status,provider,created_at,updated_at) "
+                        "VALUES(?,?,'received',?,?,?)"
+                    ),
+                    (task_id, source_id, self.settings.provider, stamp, stamp),
+                )
+                return self._task(db, task_id), False
+        except BaseException:
+            if created_path is not None:
+                try:
+                    with transaction(self.root) as db:
+                        referenced = db.execute(
+                            "SELECT 1 FROM sources WHERE path=?",
+                            (f"images/{created_path.name}",),
+                        ).fetchone()
+                        if not referenced:
+                            created_path.unlink(missing_ok=True)
+                except (OSError, sqlite3.Error):
+                    # A later startup reconciles the file if disk/DB access is
+                    # currently unavailable. Do not hide the original failure.
+                    logger.error('{"error_code":"EVIDENCE_CLEANUP_PENDING"}')
+            raise
 
     def _task(self, db: sqlite3.Connection, task_id: str) -> dict[str, Any]:
         row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -139,17 +180,61 @@ class Service:
             return self._task(db, task_id)
 
     def tasks(self) -> list[dict[str, Any]]:
+        """Compatibility helper; HTTP callers use the explicitly paginated view."""
+        return self.task_page(limit=500)["tasks"]
+
+    def task_page(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        status: str | None = None,
+        q: str | None = None,
+    ) -> dict[str, Any]:
+        if type(limit) is not int or not 1 <= limit <= 500 or type(offset) is not int or offset < 0:
+            raise AppError("VALIDATION_ERROR", "分页参数无效", 422)
+        statuses = {"received", "recognizing", "review_required", "confirmed", "rejected", "failed"}
+        if status and status not in statuses | {"processing"}:
+            raise AppError("VALIDATION_ERROR", "任务状态无效", 422)
+        if q is not None and (not isinstance(q, str) or len(q) > 200):
+            raise AppError("VALIDATION_ERROR", "搜索文本过长", 422)
+        filters: list[str] = []
+        parameters: list[Any] = []
+        if status == "processing":
+            filters.append("t.status IN ('received','recognizing')")
+        elif status:
+            filters.append("t.status=?")
+            parameters.append(status)
+        if q and q.strip():
+            # instr performs literal matching: '%' and '_' are ordinary input.
+            filters.append(
+                "(instr(lower(t.id),lower(?))>0 OR instr(lower(s.source_label),lower(?))>0 "
+                "OR instr(lower(s.filename),lower(?))>0)"
+            )
+            parameters.extend([q.strip()] * 3)
+        query = " FROM tasks t JOIN sources s ON s.id=t.source_id"
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
         with connect(self.root) as db:
-            return [
-                self._task(db, r[0])
-                for r in db.execute(
-                    "SELECT id FROM tasks ORDER BY created_at DESC LIMIT 500"
-                ).fetchall()
-            ]
+            db.execute("BEGIN")
+            total = db.execute("SELECT count(*)" + query, parameters).fetchone()[0]
+            rows = db.execute(
+                "SELECT t.id" + query + " ORDER BY t.created_at DESC,t.id DESC LIMIT ? OFFSET ?",
+                [*parameters, limit, offset],
+            ).fetchall()
+            tasks = [self._task(db, row[0]) for row in rows]
+        return {
+            "tasks": tasks,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(tasks) < total,
+        }
 
     def orders(self, db: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
         if db is None:
             with connect(self.root) as connection:
+                connection.execute("BEGIN")
                 return self.orders(connection)
         result = []
         for row in db.execute("SELECT * FROM orders ORDER BY created_at DESC").fetchall():
@@ -268,9 +353,11 @@ class Service:
             )
         )
 
-    def retry(self, task_id: str) -> dict[str, Any]:
+    def retry(self, task_id: str, expected_version: int | None = None) -> dict[str, Any]:
         with transaction(self.root) as db:
             task = self._task(db, task_id)
+            if expected_version is not None and task["version"] != expected_version:
+                raise AppError("VERSION_CONFLICT", "任务状态已改变，请刷新", 409)
             if task["status"] != "failed":
                 raise AppError("STATE_CONFLICT", "仅失败任务可重试", 409)
             if task["sources"][0]["expired"]:
@@ -314,10 +401,6 @@ class Service:
         payload_hash = hashlib.sha256(
             encode({"task_id": task_id, **request.model_dump(mode="json")}).encode()
         ).hexdigest()
-        if not request.actor.strip() or not request.reason.strip():
-            raise AppError("VALIDATION_ERROR", "操作者和原因不得为空白", 422)
-        for event in request.events:
-            validate_confirmation(event, set(self.settings.sku_catalog))
         with transaction(self.root) as db:
             prior = db.execute(
                 "SELECT * FROM requests WHERE key=?", (request.idempotency_key,)
@@ -326,6 +409,10 @@ class Service:
                 if prior["payload_hash"] != payload_hash:
                     raise AppError("IDEMPOTENCY_CONFLICT", "同一请求标识对应不同内容", 409)
                 return json.loads(prior["response"])
+            if not request.actor.strip() or not request.reason.strip():
+                raise AppError("VALIDATION_ERROR", "操作者和原因不得为空白", 422)
+            for event in request.events:
+                validate_confirmation(event, set(self.settings.sku_catalog))
             task = self._task(db, task_id)
             if task["version"] != request.expected_version or task["status"] != "review_required":
                 raise AppError("VERSION_CONFLICT", "任务已被处理，请刷新", 409)
@@ -334,40 +421,43 @@ class Service:
             self._validate_evidence(
                 Candidate(schema_version="1", events=request.events), {task["source_id"]}
             )
+            ids = [
+                self._apply_event(db, task_id, event, request.actor, request.reason)
+                for event in request.events
+            ]
+            # Compare the final transaction state, including amendments and
+            # cancellations in this same batch. A warning rolls back every write.
+            changed_ids = {
+                order_id
+                for order_id, event in zip(ids, request.events, strict=True)
+                if event.action in {"create", "amend"}
+            }
+            created_ids = {
+                order_id
+                for order_id, event in zip(ids, request.events, strict=True)
+                if event.action == "create"
+            }
+            confirmed = [order for order in self.orders(db) if order["status"] == "confirmed"]
             duplicate_ids: set[str] = set()
-            batch_keys: set[str] = set()
-            batch_external_ids: set[str] = set()
-            for event in request.events:
-                if event.action == "create":
-                    batch_key = encode(
-                        [
-                            event.customer,
-                            event.currency,
-                            self._item_fingerprint(
-                                [i.model_dump(mode="json") for i in event.items]
-                            ),
-                        ]
+            for current in confirmed:
+                if current["id"] not in changed_ids:
+                    continue
+                for other in confirmed:
+                    if current["id"] == other["id"]:
+                        continue
+                    same_external = bool(current["external_id"]) and (
+                        current["external_id"] == other["external_id"]
                     )
-                    if batch_key in batch_keys or (
-                        event.external_id and event.external_id in batch_external_ids
-                    ):
-                        duplicate_ids.add("current-batch")
-                    batch_keys.add(batch_key)
-                    if event.external_id:
-                        batch_external_ids.add(event.external_id)
-                    for existing in self.orders(db):
-                        if existing["status"] != "confirmed":
-                            continue
-                        if event.external_id and existing["external_id"] == event.external_id:
-                            duplicate_ids.add(existing["id"])
-                        elif (
-                            existing["customer"] == event.customer
-                            and existing["currency"] == event.currency
-                        ):
-                            if self._item_fingerprint(existing["items"]) == self._item_fingerprint(
-                                [i.model_dump(mode="json") for i in event.items]
-                            ):
-                                duplicate_ids.add(existing["id"])
+                    same_items = (
+                        current["customer"] == other["customer"]
+                        and current["currency"] == other["currency"]
+                        and self._item_fingerprint(current["items"])
+                        == self._item_fingerprint(other["items"])
+                    )
+                    if same_external or same_items:
+                        duplicate_ids.add(
+                            "current-batch" if other["id"] in created_ids else other["id"]
+                        )
             if duplicate_ids and not request.acknowledge_duplicates:
                 raise AppError(
                     "DUPLICATE_WARNING",
@@ -375,10 +465,6 @@ class Service:
                     409,
                     {"order_ids": sorted(duplicate_ids)},
                 )
-            ids = [
-                self._apply_event(db, task_id, event, request.actor, request.reason)
-                for event in request.events
-            ]
             db.execute(
                 "UPDATE tasks SET status='confirmed',version=version+1,updated_at=? WHERE id=?",
                 (now(), task_id),
@@ -579,12 +665,14 @@ class Service:
 
     def status(self) -> dict[str, Any]:
         with connect(self.root) as db:
+            db.execute("BEGIN")
             counts = {
                 r[0]: r[1]
                 for r in db.execute("SELECT status,count(*) FROM tasks GROUP BY status").fetchall()
             }
             export = db.execute(
-                "SELECT id,status,error_code FROM exports ORDER BY created_at DESC LIMIT 1"
+                "SELECT id,status,error_code,created_at,metadata FROM exports "
+                "ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
             pending = db.execute(
                 "SELECT count(*) FROM outbox WHERE status!='completed'"
@@ -593,10 +681,15 @@ class Service:
             avg = db.execute(
                 "SELECT avg(duration_ms) FROM tasks WHERE duration_ms IS NOT NULL"
             ).fetchone()[0]
+        export_status = dict(export) if export else {"status": "none", "error_code": None}
+        if export:
+            export_status["metadata"] = (
+                json.loads(export["metadata"]) if export["metadata"] else None
+            )
         return {
             "provider": self.settings.provider,
             "counts": counts,
-            "export": dict(export) if export else {"status": "none", "error_code": None},
+            "export": export_status,
             "pending_export_events": pending,
             "recognition_avg_ms": avg,
             "inbox_enabled": self.settings.inbox is not None,

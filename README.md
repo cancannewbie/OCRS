@@ -33,6 +33,12 @@ uv run --locked ocrs serve
 
 终端按 `Ctrl+C` 停止服务。数据库、图片、令牌与导出默认保存在仓库之外的 `~/.ocrs`；可通过 `OCRS_DATA_DIR` 改变位置。不要把令牌、真实截图或导出粘贴到 issue、PR 或公开日志。
 
+## 工作台导航
+
+新版将操作分为工作台、审核队列、正式订单、导出中心和只读运行配置。队列支持分页、状态筛选及来源标签/文件名/任务编号搜索；详情中对照原图审核，返回队列保留上下文。配置页只说明当前设置，不代表真实模型已经验证。备份恢复仍需先停机后使用 CLI。
+
+版本变化见 [CHANGELOG](CHANGELOG.md)，设计依据见 [UI_DESIGN](docs/UI_DESIGN.md)。
+
 ## 配置与边界
 
 配置示例见 [.env.example](.env.example)，完整解释、真实模型启用、受控目录导入、备份恢复及证据清理见 [OPERATIONS.md](docs/OPERATIONS.md)。
@@ -56,6 +62,17 @@ uv run --locked mypy src
 uv run --locked pytest
 uv build
 ```
+
+前端回归另需 Node.js 22（运行应用本身不需要 Node）：
+
+```sh
+npm ci
+npm run test:frontend
+npx playwright install --with-deps chromium
+npm run test:e2e
+```
+
+浏览器验收在临时数据目录使用虚构图片与 demo；不调用付费模型。测试截图由 CI 保留为产物，不上传业务资料。完整范围与未验收项见 [验收矩阵](docs/ACCEPTANCE.md)。
 
 [CI 配置](.github/workflows/ci.yml) 在 Linux/Windows 的 Python 3.12 下执行这些检查，不部署服务。命令与配置的存在不代表某次提交已通过；实际结果以该次运行记录为准。
 

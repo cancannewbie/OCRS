@@ -1,5 +1,6 @@
 """SQLite schema migration, atomic transactions and backup support."""
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -94,16 +95,77 @@ def encode(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def backup(root: Path, destination: Path) -> None:
-    """Offline service lock is acquired by CLI; bundle every retained image with DB."""
+class EvidenceIntegrityError(ValueError):
+    """A retained image has an unsafe reference, missing bytes or a changed digest."""
+
+
+def evidence_path(root: Path, reference: str) -> Path:
+    """Validate a generated image reference, including missing files during purge."""
+    root = root.resolve()
+    relative = Path(reference)
+    if (
+        len(relative.parts) < 2
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative.parts[0] != "images"
+    ):
+        raise EvidenceIntegrityError("EVIDENCE_PATH_INVALID")
+    path = root / relative
+    images = root / "images"
+    try:
+        if not path.resolve().is_relative_to(images):
+            raise EvidenceIntegrityError("EVIDENCE_PATH_INVALID")
+        for part in (path, *path.parents):
+            if part.is_symlink() or part.is_junction():
+                raise EvidenceIntegrityError("EVIDENCE_PATH_INVALID")
+            if part == images:
+                break
+    except (OSError, RuntimeError) as exc:
+        raise EvidenceIntegrityError("EVIDENCE_PATH_INVALID") from exc
+    return path
+
+
+def verify_evidence(root: Path, connection: sqlite3.Connection) -> list[Path]:
+    """Verify every live evidence reference and its bytes, with bounded-memory hashing."""
+    paths = []
+    for reference, digest in connection.execute("SELECT path,digest FROM sources WHERE expired=0"):
+        path = evidence_path(root, reference)
+        try:
+            if not path.is_file():
+                raise EvidenceIntegrityError("EVIDENCE_MISSING")
+            with path.open("rb") as stream:
+                actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        except OSError as exc:
+            raise EvidenceIntegrityError("EVIDENCE_UNREADABLE") from exc
+        if actual != digest:
+            raise EvidenceIntegrityError("EVIDENCE_CHANGED")
+        paths.append(path)
+    return paths
+
+
+def copy_evidence(root: Path, destination: Path, paths: list[Path]) -> None:
+    """Copy only verified, retained evidence; never traverse unreferenced files."""
     import shutil
 
-    destination.mkdir(parents=True, exist_ok=False, mode=0o700)
-    source = connect(root)
-    target = sqlite3.connect(destination / "ocrs.sqlite3")
-    try:
-        source.backup(target)
-    finally:
-        target.close()
-        source.close()
-    shutil.copytree(root / "images", destination / "images")
+    (destination / "images").mkdir(mode=0o700)
+    for path in paths:
+        copy = destination / path.relative_to(root)
+        copy.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copy2(path, copy)
+
+
+def backup(root: Path, destination: Path) -> None:
+    """Offline service lock is acquired by CLI; bundle every retained image with DB."""
+    root = root.resolve()
+    with connect(root) as source:
+        paths = verify_evidence(root, source)
+        destination.mkdir(parents=True, exist_ok=False, mode=0o700)
+        target = sqlite3.connect(destination / "ocrs.sqlite3")
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+        copy_evidence(root, destination, paths)
+    # Check the actual copied bytes too, before reporting a recoverable backup.
+    with connect(destination) as snapshot:
+        verify_evidence(destination, snapshot)

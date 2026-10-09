@@ -148,7 +148,7 @@ def test_invalid_upload_batch_creates_nothing(client: TestClient, bad: bytes) ->
         ],
     )
     assert response.status_code == 400
-    assert client.get("/api/tasks", headers=AUTH).json() == {"tasks": []}
+    assert client.get("/api/tasks", headers=AUTH).json()["tasks"] == []
     assert not list((client.app.state.service.root / "images").iterdir())
 
 
@@ -163,7 +163,7 @@ def test_long_filename_rejects_batch_without_partial_import(client: TestClient) 
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "SOURCE_INVALID"
-    assert client.get("/api/tasks", headers=AUTH).json() == {"tasks": []}
+    assert client.get("/api/tasks", headers=AUTH).json()["tasks"] == []
 
 
 def test_filename_traversal_is_never_used_as_storage_path(client: TestClient) -> None:

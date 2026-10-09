@@ -14,7 +14,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       OCRS_PROVIDER: demo
       OCRS_ALLOW_EXTERNAL: 'false'
@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.12.23'
@@ -36,6 +40,24 @@ jobs:
         run: uv run --locked ruff format --check .
       - name: Check browser JavaScript syntax
         run: node --check src/ocrs/static/app.js
+      - name: Install locked frontend test dependencies
+        run: npm ci
+      - name: Run offline frontend regressions
+        run: npm run test:frontend
+      - name: Install Chromium for end-to-end tests
+        run: npx playwright install --with-deps chromium
+      - name: Run offline browser acceptance
+        run: npm run test:e2e
+      - name: Preserve browser acceptance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-acceptance-${{ matrix.os }}
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Check types
         run: uv run --locked mypy src
       - name: Run offline tests
