@@ -1,0 +1,17 @@
+{
+  "name": "ocrs-frontend-regressions",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Offline DOM regression checks for the native OCRS review workbench",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test:frontend": "node --test tests/frontend/auth-security.test.cjs tests/frontend/review-mutations.test.cjs tests/frontend/upload-navigation.test.cjs",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "jsdom": "26.1.0"
+  }
+}

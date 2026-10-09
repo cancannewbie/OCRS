@@ -5,13 +5,23 @@ import os
 import secrets
 import shutil
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
 from filelock import FileLock
 
-from ocrs.storage import backup, connect, migrate, transaction
+from ocrs.storage import (
+    EvidenceIntegrityError,
+    backup,
+    connect,
+    copy_evidence,
+    evidence_path,
+    migrate,
+    transaction,
+    verify_evidence,
+)
 
 
 def main() -> None:
@@ -34,33 +44,42 @@ def main() -> None:
     if args.command == "restore":
         if root.exists():
             parser.error("恢复目标必须是不存在的新 OCRS_DATA_DIR")
-        source = args.source.resolve()
-        if not (source / "ocrs.sqlite3").is_file() or not (source / "images").is_dir():
+        source = args.source.expanduser().absolute()
+        if source.is_symlink() or source.is_junction():
+            parser.error("备份根目录不得是符号链接或目录联接")
+        source = source.resolve()
+        if root.is_relative_to(source):
+            parser.error("恢复目标必须位于备份目录之外")
+        database = source / "ocrs.sqlite3"
+        # SQLite can automatically read or write its fixed journal sidecars.
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            database_file = source / f"ocrs.sqlite3{suffix}"
+            if database_file.is_symlink() or database_file.is_junction():
+                parser.error("备份数据库及日志文件不得是符号链接或目录联接")
+        if not database.is_file() or not (source / "images").is_dir():
             parser.error("备份缺少数据库或图片目录")
-        if source.is_symlink() or any(path.is_symlink() for path in source.rglob("*")):
-            parser.error("备份不得包含符号链接")
-        with sqlite3.connect(source / "ocrs.sqlite3") as db:
+        images = source / "images"
+        if images.is_symlink() or images.is_junction():
+            parser.error("备份图片目录不得是符号链接或目录联接")
+        with closing(sqlite3.connect(database)) as db:
             if db.execute("PRAGMA user_version").fetchone()[0] != 1:
                 parser.error("备份数据库版本不受支持")
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 parser.error("备份数据库完整性检查失败")
             if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 parser.error("备份数据库关联完整性检查失败")
-            for row in db.execute("SELECT path FROM sources WHERE expired=0"):
-                path = Path(row[0])
-                resolved = (source / path).resolve()
-                if (
-                    not path.parts
-                    or path.is_absolute()
-                    or ".." in path.parts
-                    or path.parts[0] != "images"
-                    or not resolved.is_relative_to(source / "images")
-                    or not resolved.is_file()
-                ):
-                    parser.error("备份图片引用不完整")
+            try:
+                paths = verify_evidence(source, db)
+            except EvidenceIntegrityError:
+                parser.error("备份图片引用不完整或摘要不匹配")
         root.mkdir(mode=0o700)
-        shutil.copy2(source / "ocrs.sqlite3", root / "ocrs.sqlite3")
-        shutil.copytree(source / "images", root / "images")
+        shutil.copy2(database, root / "ocrs.sqlite3")
+        copy_evidence(source, root, paths)
+        with connect(root) as db:
+            try:
+                verify_evidence(root, db)
+            except EvidenceIntegrityError:
+                parser.error("恢复后的图片引用不完整或摘要不匹配，请保留原备份并使用新目录重试")
         migrate(root)
         with transaction(root) as db:
             db.execute("DELETE FROM exports")
@@ -92,7 +111,10 @@ def main() -> None:
         if args.destination.resolve().is_relative_to(root):
             parser.error("备份目标必须位于数据目录之外")
         with FileLock(str(root / "service.lock"), timeout=0):
-            backup(root, args.destination.resolve())
+            try:
+                backup(root, args.destination.resolve())
+            except EvidenceIntegrityError:
+                parser.error("原图缺失、引用无效或摘要不匹配，备份未完成")
         print("备份完成，包含数据库及原图，不含密钥和可重建 Excel。")
     elif args.command == "purge-evidence":
         if not args.confirm or args.days < 1:
@@ -101,10 +123,14 @@ def main() -> None:
         with FileLock(str(root / "service.lock"), timeout=0):
             with transaction(root) as db:
                 rows = db.execute(
-                    "SELECT id,path FROM sources WHERE created_at<? AND expired=0", (cutoff,)
+                    "SELECT id,path FROM sources WHERE expired=1 OR (created_at<? AND expired=0)",
+                    (cutoff,),
                 ).fetchall()
+                try:
+                    paths = [evidence_path(root, row["path"]) for row in rows]
+                except EvidenceIntegrityError:
+                    parser.error("到期图片引用无效，未执行删除")
                 for row in rows:
-                    (root / row["path"]).unlink(missing_ok=True)
                     db.execute("UPDATE sources SET expired=1 WHERE id=?", (row["id"],))
                     db.execute(
                         (
@@ -114,10 +140,22 @@ def main() -> None:
                         (row["id"],),
                     )
                     db.execute("UPDATE tasks SET candidate=NULL WHERE source_id=?", (row["id"],))
+            # Commit logical expiry before deleting bytes. Already-expired rows are
+            # included above so interruptions and individual unlink failures can retry.
+            delete_failed = False
+            for path in paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    delete_failed = True
             with connect(root) as db:
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 db.execute("VACUUM")
-        print(f"已清理 {len(rows)} 份到期证据；正式订单与审计保留，备份需单独清理。")
+            if delete_failed:
+                parser.error(
+                    "部分到期图片删除失败；证据已标记过期，请排除文件占用或权限问题后重试同一命令"
+                )
+        print(f"已处理 {len(rows)} 份到期证据（含重试清理）；正式订单与审计保留，备份需单独清理。")
 
 
 def _create_token(root: Path) -> None:

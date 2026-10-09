@@ -1,5 +1,6 @@
 """Loopback-only HTTP boundary; every data endpoint requires bearer authentication."""
 
+import hashlib
 import hmac
 import logging
 import threading
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,17 +18,36 @@ from filelock import FileLock
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from ocrs import __version__
 from ocrs.capture import CaptureError, InboxWatcher
 from ocrs.config import Settings
+from ocrs.domain import CURRENCY_MINOR_UNITS
 from ocrs.security import RequestGuard
 from ocrs.service import AppError, Confirmation, Service
-from ocrs.storage import connect
+from ocrs.storage import SCHEMA_VERSION, connect
 
 
 class RejectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=500)
+
+
+class RetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(ge=1)
+
+
+def _ingest_inbox(service: Service, data: bytes, label: str) -> tuple[dict[str, Any], bool]:
+    filename = label.removeprefix("inbox:")
+    # Valid filesystem names can exceed the source-label bound after the prefix.
+    # Hash only long labels, preserving previous identities and the full filename.
+    source_label = (
+        label
+        if len(label) <= 200
+        else "inbox-long-sha256:" + hashlib.sha256(filename.encode()).hexdigest()
+    )
+    return service.ingest(data, filename, source_label)
 
 
 def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
@@ -37,7 +57,7 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     watcher = (
         InboxWatcher(
             settings.inbox,
-            lambda data, mime, label: service.ingest(data, label.removeprefix("inbox:"), label),
+            lambda data, mime, label: _ingest_inbox(service, data, label),
         )
         if settings.inbox
         else None
@@ -154,9 +174,41 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     def status() -> dict[str, Any]:
         return service.status()
 
+    @app.get("/api/config", dependencies=auth)
+    def configuration() -> dict[str, Any]:
+        # Explicit allowlist: never serialize Settings, credentials, URLs, or local paths.
+        return {
+            "version": __version__,
+            "schema_version": SCHEMA_VERSION,
+            "provider": settings.provider,
+            "recognition_mode": "demo" if settings.provider == "demo" else "external",
+            "model_configured": bool(settings.model and settings.api_key),
+            "external_transmission_enabled": (
+                settings.provider != "demo" and settings.allow_external
+            ),
+            "inbox_enabled": settings.inbox is not None,
+            "max_upload_bytes": settings.max_upload_bytes,
+            "max_upload_files": 8,
+            "evidence_days": settings.evidence_days,
+            "sku_catalog": sorted(settings.sku_catalog),
+            "supported_currencies": sorted(CURRENCY_MINOR_UNITS),
+            "deployment_mode": "single-user-local",
+            "backup_mode": "offline-cli",
+        }
+
     @app.get("/api/tasks", dependencies=auth)
-    def tasks() -> dict[str, Any]:
-        return {"tasks": service.tasks()}
+    def tasks(
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        status: Annotated[
+            str | None,
+            Query(
+                pattern="^(received|recognizing|processing|review_required|confirmed|rejected|failed)$"
+            ),
+        ] = None,
+        q: Annotated[str | None, Query(max_length=200)] = None,
+    ) -> dict[str, Any]:
+        return service.task_page(limit=limit, offset=offset, status=status, q=q)
 
     @app.get("/api/tasks/{task_id}", dependencies=auth)
     def task(task_id: str) -> dict[str, Any]:
@@ -201,8 +253,8 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
         return FileResponse(settings.data_dir / row["path"], media_type=row["mime"])
 
     @app.post("/api/tasks/{task_id}/retry", dependencies=auth)
-    def retry(task_id: str) -> dict[str, Any]:
-        return service.retry(task_id)
+    def retry(task_id: str, body: RetryRequest) -> dict[str, Any]:
+        return service.retry(task_id, body.expected_version)
 
     @app.post("/api/tasks/{task_id}/reject", dependencies=auth)
     def reject(task_id: str, body: RejectRequest) -> dict[str, Any]:

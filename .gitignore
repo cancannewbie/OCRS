@@ -39,6 +39,8 @@ dist/
 # Optional web tooling artifacts
 node_modules/
 coverage/
+test-results/
+playwright-report/
 
 # Local editor and OS artifacts
 .idea/
