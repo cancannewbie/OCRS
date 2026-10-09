@@ -289,3 +289,142 @@ test("a delayed older search cannot publish results over a newer query", async (
     assert.match(app.id("task-list").textContent, /Synthetic Customer Beta/);
     assert.doesNotMatch(app.id("task-list").textContent, /Synthetic Customer Alpha/);
 });
+
+function mockDialogLayout(app, dialogId) {
+    // jsdom has no layout. Supply rectangles only for testing explicit focus
+    // boundaries; real visibility and native Tab traversal remain E2E checks.
+    for (const node of app.id(dialogId).querySelectorAll("a[href], button, input, select, textarea, summary, [tabindex], [contenteditable]")) {
+        node.getClientRects = () => [{ width: 100, height: 30 }];
+    }
+}
+
+function keydown(app, node, options = {}) {
+    const event = new app.window.KeyboardEvent("keydown", {
+        key: "Tab", bubbles: true, cancelable: true, ...options,
+    });
+    node.dispatchEvent(event);
+    return event;
+}
+
+const dialogCases = [
+    {
+        name: "upload", dialog: "upload-dialog", first: "close-upload", last: "upload-submit",
+        open: (app) => app.click("open-upload"),
+    },
+    {
+        name: "confirmation", dialog: "confirm-dialog", first: "confirm-cancel", last: "confirm-submit",
+        open: async (app) => { await app.select(); app.reviewer(); await app.submit("review-form"); },
+    },
+    {
+        name: "rejection", dialog: "reject-dialog", first: "reject-reason", last: "reject-submit",
+        open: async (app) => { await app.select(); await app.click("reject-button"); },
+    },
+    {
+        name: "duplicate warning", dialog: "duplicate-dialog", first: "duplicate-checkbox", last: "duplicate-cancel",
+        open: async (app) => {
+            await app.select();
+            app.reviewer();
+            app.on("/api/tasks/task-1/confirm", () => json({ error: { code: "DUPLICATE_WARNING", details: { order_ids: ["synthetic-existing-order"] } } }, 409));
+            await app.confirm();
+        },
+    },
+    {
+        name: "order history", dialog: "order-history-dialog", first: "history-close", last: "history-done",
+        open: async (app) => {
+            await app.click("nav-orders");
+            app.document.querySelector("#orders-content .order-open").click();
+            await flush();
+        },
+    },
+];
+
+for (const scenario of dialogCases) {
+    test(`${scenario.name} dialog keeps Tab and Shift+Tab inside its enabled first/last controls`, async (t) => {
+        const app = setup(t, { orders: [makeOrder()] });
+        await app.login();
+        await scenario.open(app);
+        mockDialogLayout(app, scenario.dialog);
+        assert.equal(app.id(scenario.dialog).open, true);
+        const first = app.id(scenario.first);
+        const last = app.id(scenario.last);
+        last.focus();
+        assert.equal(app.document.activeElement, last);
+        assert.equal(keydown(app, last).defaultPrevented, true);
+        assert.equal(app.document.activeElement, first);
+        assert.equal(keydown(app, first, { shiftKey: true }).defaultPrevented, true);
+        assert.equal(app.document.activeElement, last);
+        // Recover focus if a programmatic action or browser transition put it outside.
+        app.id("refresh-button").focus();
+        assert.equal(keydown(app, app.id("refresh-button")).defaultPrevented, true);
+        assert.equal(app.document.activeElement, first);
+        app.id("refresh-button").focus();
+        assert.equal(keydown(app, app.id("refresh-button"), { shiftKey: true }).defaultPrevented, true);
+        assert.equal(app.document.activeElement, last);
+        if (scenario.name === "duplicate warning") {
+            assert.equal(app.id("duplicate-confirm").disabled, true);
+            app.id("duplicate-checkbox").checked = true;
+            app.dispatch(app.id("duplicate-checkbox"), "change");
+            app.id("duplicate-confirm").focus();
+            assert.equal(keydown(app, app.id("duplicate-confirm")).defaultPrevented, true);
+            assert.equal(app.document.activeElement, first);
+            assert.equal(keydown(app, first, { shiftKey: true }).defaultPrevented, true);
+            assert.equal(app.document.activeElement, app.id("duplicate-confirm"));
+        }
+    });
+}
+
+test("dialog focus excludes hidden/disabled controls and leaves ordinary keys and interior Tab untouched", async (t) => {
+    const app = setup(t);
+    await app.login();
+    await app.click("open-upload");
+    const dialog = app.id("upload-dialog");
+    for (const kind of ["hidden", "disabled", "inert", "invisible", "no-layout"]) {
+        const node = app.document.createElement("button");
+        node.textContent = `Synthetic ${kind} control`;
+        if (kind === "hidden") node.hidden = true;
+        if (kind === "disabled") node.disabled = true;
+        if (kind === "inert") node.setAttribute("inert", "");
+        if (kind === "invisible") node.style.visibility = "hidden";
+        node.getClientRects = () => kind === "no-layout" ? [] : [{ width: 100, height: 30 }];
+        dialog.prepend(node);
+        dialog.append(node.cloneNode(true));
+        dialog.lastChild.getClientRects = node.getClientRects;
+    }
+    for (const id of ["close-upload", "upload-files", "source-label", "cancel-upload", "upload-submit"])
+        app.id(id).getClientRects = () => [{ width: 100, height: 30 }];
+    app.id("upload-submit").focus();
+    assert.equal(keydown(app, app.id("upload-submit")).defaultPrevented, true);
+    assert.equal(app.document.activeElement, app.id("close-upload"));
+    assert.equal(keydown(app, app.id("close-upload"), { shiftKey: true }).defaultPrevented, true);
+    assert.equal(app.document.activeElement, app.id("upload-submit"));
+    app.id("source-label").focus();
+    assert.equal(keydown(app, app.id("source-label")).defaultPrevented, false);
+    assert.equal(app.document.activeElement, app.id("source-label"));
+    for (const options of [{ key: "Escape" }, { key: "Enter" }, { isComposing: true }, { altKey: true }, { ctrlKey: true }, { metaKey: true }]) {
+        app.id("upload-submit").focus();
+        assert.equal(keydown(app, app.id("upload-submit"), options).defaultPrevented, false);
+        assert.equal(app.document.activeElement, app.id("upload-submit"));
+    }
+});
+
+test("an in-flight dialog with every control disabled retains focus on the dialog itself", async (t) => {
+    const app = setup(t);
+    await app.login();
+    await app.click("open-upload");
+    app.files();
+    mockDialogLayout(app, "upload-dialog");
+    const pending = deferred();
+    app.on("/api/uploads", () => pending.promise);
+    app.dispatch(app.id("upload-form"), "submit");
+    await flush();
+    const dialog = app.id("upload-dialog");
+    assert.equal(dialog.getAttribute("tabindex"), "-1");
+    app.id("refresh-button").focus();
+    assert.equal(keydown(app, app.id("refresh-button")).defaultPrevented, true);
+    assert.equal(app.document.activeElement, dialog);
+    assert.equal(keydown(app, dialog, { shiftKey: true }).defaultPrevented, true);
+    assert.equal(app.document.activeElement, dialog);
+    pending.resolve(json({ tasks: app.server.tasks, duplicates: [] }));
+    await flush();
+    assert.equal(dialog.open, false);
+});

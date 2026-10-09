@@ -227,6 +227,8 @@
 
     function openDialog(id, focusId = null) {
         const dialog = byId(id);
+        // Keep a safe focus destination when an in-flight action disables every control.
+        dialog.setAttribute("tabindex", "-1");
         if (!dialog.open) {
             state.dialogFocus.set(id, document.activeElement);
             dialog.showModal();
@@ -236,6 +238,54 @@
 
     function closeDialog(id) {
         if (byId(id).open) byId(id).close();
+    }
+
+    function trapDialogFocus(event) {
+        // Let native file pickers, Escape and IME composition keep their own behavior.
+        if (
+            event.key !== "Tab" ||
+            event.isComposing ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey
+        ) return;
+        const dialogs = Array.from(document.querySelectorAll("dialog[open]"));
+        const dialog = dialogs[dialogs.length - 1];
+        if (!dialog) return;
+        const selector = [
+            "a[href]", "button", "input", "select", "textarea", "summary",
+            "[tabindex]", '[contenteditable="true"]',
+        ].join(",");
+        const controls = Array.from(dialog.querySelectorAll(selector)).filter(
+            (node) => {
+                if (
+                    node.tabIndex < 0 ||
+                    node.matches(":disabled") ||
+                    node.closest("[hidden], [inert]") ||
+                    node.getClientRects().length === 0
+                ) return false;
+                const visibility = getComputedStyle(node).visibility;
+                return visibility !== "hidden" && visibility !== "collapse";
+            },
+        );
+        // Native dialogs can send Tab to browser chrome at the final control.
+        // Only take over at the boundary; ordinary controls retain native tab order.
+        const active = document.activeElement;
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (!first) {
+            event.preventDefault();
+            dialog.focus();
+        } else if (!dialog.contains(active) || !controls.includes(active)) {
+            event.preventDefault();
+            (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey && active === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+        }
     }
 
     function hasUnsavedWork() {
@@ -2025,6 +2075,7 @@
     for (const id of ["history-close", "history-done"]) byId(id).addEventListener("click", () => closeDialog("order-history-dialog"));
     byId("export-button").addEventListener("click", exportOrders);
     byId("download-button").addEventListener("click", downloadExport);
+    document.addEventListener("keydown", trapDialogFocus, true);
     document.addEventListener("keydown", (event) => {
         if (document.querySelector("dialog[open]") || !state.token) return;
         const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName);
