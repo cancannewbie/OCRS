@@ -474,7 +474,8 @@ test("a real version conflict preserves the draft until the reviewer explicitly 
         expect(response.status()).toBe(409);
         expect(await response.json()).toMatchObject({ error: { code: "VERSION_CONFLICT" } });
         await expect(page.locator("#confirm-error")).toBeVisible();
-        await expect(page.locator("#confirm-error")).toContainText("记录已被更新");
+        await expect(page.locator("#confirm-error")).toContainText("任务或目标订单已变化");
+        await expect(page.locator("#confirm-error")).toContainText("VERSION_CONFLICT");
         await expect(page.locator("#confirm-cancel")).toBeEnabled();
         expect(await oneOrder(request, data.customer)).toEqual(current);
         expect(await history(request, original.id)).toEqual(currentHistory);
