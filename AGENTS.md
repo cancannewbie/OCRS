@@ -4,7 +4,7 @@
 
 1. 阅读 README.md、[代码规范](docs/CODING_STANDARDS.md) 和 [贡献指南](CONTRIBUTING.md)。
 2. 检查实际目录、依赖清单、现有测试和局部 AGENTS.md；更具体的目录约定适用于该目录。
-3. 本仓库目前仅有规范。不要声称已有可运行程序、测试、CI 或已确定的技术栈。
+3. 本仓库已采用 Python 3.12、uv、FastAPI、原生 JavaScript 和 SQLite 的单机工作流；先检查当前实现与测试，参阅 README 及 docs/decisions/0001-local-workflow.md。不要把 demo 当作真实 OCR，也不要把配置存在写成验证通过。
 4. 先明确变更目标和验收标准；范围不清时询问关键问题。保留已有内容，不顺带重构无关模块。
 
 ## 不可破坏的业务约束
