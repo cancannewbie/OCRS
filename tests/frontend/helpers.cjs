@@ -101,7 +101,7 @@ function setup(t, options = {}) {
         unauthorized: false,
         config: {
             provider: "demo",
-            version: "0.2.0",
+            version: "0.2.1",
             schema_version: 1,
             recognition_mode: "demo",
             model_configured: false,

@@ -20,7 +20,7 @@
         UNAUTHORIZED: "访问令牌无效或已失效，请重新验证。",
         AUTHENTICATION_REQUIRED: "请先验证访问令牌。",
         INVALID_TOKEN: "访问令牌无效或已失效，请重新验证。",
-        VERSION_CONFLICT: "记录已被更新。请重新载入并核对最新版本。",
+        VERSION_CONFLICT: "任务或目标订单已变化，请核对最新版本和订单状态后再提交。",
         DUPLICATE_WARNING: "检测到可能重复的订单，请再次核对。",
         VALIDATION_ERROR:
             "字段未通过校验。请检查必填项、数量、金额与时间格式。",
@@ -775,15 +775,14 @@
         byId("confirm-button").disabled =
             conflict || state.operations.has(`task:${task.id}`);
         const renderKey = `${task.id}:${task.version}:${task.status}`;
-        // Polling updates metadata and conflicts, but never replaces unsaved controls.
-        if (!force && state.lastRenderKey === renderKey) return;
-        if (
-            !force &&
-            state.lastRenderKey?.startsWith(`${task.id}:`) &&
-            draft.dirty &&
-            conflict
-        )
+        // Orders can change independently of the candidate task. Refresh references
+        // without replacing draft controls, their focus, or their selection.
+        if (!force && (state.lastRenderKey === renderKey || (
+            state.lastRenderKey?.startsWith(`${task.id}:`) && draft.dirty && conflict
+        ))) {
+            updateOrderReferences(task, draft);
             return;
+        }
         state.lastRenderKey = renderKey;
         const statusBadge = byId("task-status");
         statusBadge.className = `badge ${Object.hasOwn(STATUS_LABELS, task.status) ? task.status : ""}`;
@@ -1050,13 +1049,8 @@
         }
         const orderList = element("datalist");
         orderList.id = "order-suggestions";
-        for (const order of state.orders) {
-            const option = element("option");
-            option.value = order.id;
-            option.label = `${displayValue(order.customer)} · v${order.version} · ${labelStatus(order.status)}`;
-            orderList.append(option);
-        }
         content.append(orderList);
+        updateOrderSuggestions();
         const catalogue = state.status?.sku_catalog;
         if (Array.isArray(catalogue)) {
             const datalist = element("datalist");
@@ -1100,6 +1094,7 @@
 
     function renderEvent(event, index, draft, task, editable) {
         const card = element("section", "event-card");
+        card.dataset.eventIndex = String(index);
         const heading = element("div", "event-heading");
         heading.append(
             element("h3", "", `订单事件 ${String(index + 1).padStart(2, "0")}`),
@@ -1163,6 +1158,7 @@
                         integer: true,
                         placeholder: "例如：1",
                         required: true,
+                        onChange: updateComparison,
                     },
                 ),
             );
@@ -1327,28 +1323,87 @@
         return card;
     }
 
+    function updateOrderSuggestions() {
+        const list = byId("order-suggestions");
+        if (!list) return;
+        const key = JSON.stringify(state.orders.map(({ id, customer, version, status }) => [id, customer, version, status]));
+        if (list.dataset.renderKey === key) return;
+        list.dataset.renderKey = key;
+        list.replaceChildren();
+        for (const order of state.orders) {
+            const option = element("option");
+            option.value = order.id;
+            option.label = `${displayValue(order.customer)} · v${order.version} · ${labelStatus(order.status)}`;
+            list.append(option);
+        }
+    }
+
+    function updateOrderReferences(task, draft) {
+        updateOrderSuggestions();
+        for (const card of byId("editor-content").querySelectorAll(".event-card")) {
+            const event = draft.events[Number(card.dataset.eventIndex)];
+            const comparison = card.querySelector(".target-comparison");
+            if (event && comparison)
+                renderTargetComparison(comparison, event, draft, task, task.status === "review_required");
+        }
+    }
+
     function renderTargetComparison(container, event, draft, task, editable) {
-        container.replaceChildren();
         const order = state.orders.find((entry) => entry.id === event.target_order_id);
+        const key = JSON.stringify([order, event.action, event.expected_order_version, editable]);
+        if (container.dataset.renderKey === key) return;
+        container.dataset.renderKey = key;
+        const snapshotOpen = container.querySelector(".target-snapshot")?.open ?? true;
+        const versionFocused = document.activeElement === container.querySelector('[data-action="use-order-version"]');
+        container.replaceChildren();
         if (!order) {
             container.append(element("p", "field-help", "选择有效的目标订单后，这里显示原单与版本信息。不要根据截图猜测订单关联。"));
             return;
         }
+        const cancelled = ["cancelled", "canceled"].includes(order.status);
         const header = element("div", "target-heading");
         header.append(element("strong", "", `原单：${displayValue(order.customer)}`), badge(order.status));
         container.append(header, element("p", "field-help", `完整 ID：${order.id} · 当前版本 v${order.version} · ${displayValue(order.currency)}`));
+        const versionMatches = event.expected_order_version === order.version;
+        const expectedVersion = Number.isInteger(event.expected_order_version) ? `v${event.expected_order_version}` : "未填写有效版本";
+        const versionHint = cancelled ? "原单已撤单，请核对订单关联。" : versionMatches
+            ? "与当前原单版本一致，请继续核对内容。"
+            : editable ? "版本不一致，草稿未自动更新。请核对最新原单及明细后，再明确带入当前版本。"
+                : "与当前原单版本不一致，历史事件仅供对照。";
+        const versionStatus = element("p", versionMatches ? "field-help target-version-status" : "alert-list target-version-status",
+            `${editable ? "本次提交版本" : "事件目标版本"} ${expectedVersion}。${versionHint}`);
+        versionStatus.setAttribute("role", "status");
+        container.append(versionStatus);
+        if (cancelled) {
+            const warning = element("p", "alert-list target-unavailable", "目标订单已撤单，不能再次修改或撤销。草稿已保留，请核对订单关联；带入新版本也不能恢复该订单。");
+            warning.setAttribute("role", "status");
+            container.append(warning);
+        }
         if (editable) {
             const useVersion = actionButton(`带入当前版本 v${order.version}`, "secondary small", () => {
-                event.expected_order_version = order.version;
+                if (!container.isConnected || state.selectedId !== task.id || state.drafts.get(task.id) !== draft ||
+                    selectedTask()?.status !== "review_required" || state.operations.has(`task:${task.id}`)) return;
+                // Resolve at click time: neither a cached order nor a full editor
+                // redraw may overwrite the user's intervening review work.
+                const current = state.orders.find((entry) => entry.id === event.target_order_id);
+                if (!current || ["cancelled", "canceled"].includes(current.status)) return;
+                event.expected_order_version = current.version;
+                const input = container.closest(".event-card").querySelector('[data-field="expected_order_version"]');
+                input.value = String(current.version);
+                const marker = input.parentElement.querySelector(".field-null");
+                if (marker) marker.hidden = true;
                 markDirty(draft);
-                renderEditor(task, draft);
+                renderTargetComparison(container, event, draft, task, editable);
             });
             useVersion.dataset.action = "use-order-version";
+            useVersion.dataset.unavailable = String(cancelled);
+            useVersion.disabled = cancelled || state.operations.has(`task:${task.id}`);
             container.append(useVersion);
+            if (versionFocused && !useVersion.disabled) useVersion.focus();
         }
         const snapshot = element("details", "target-snapshot");
-        snapshot.open = true;
-        snapshot.append(element("summary", "", event.action === "cancel" ? "撤单影响：保留历史，将原单标记为已撤单" : "原单明细对照（修改会完整替换明细）"));
+        snapshot.open = snapshotOpen;
+        snapshot.append(element("summary", "", cancelled ? "已撤单原单明细（仅供核对历史）" : event.action === "cancel" ? "撤单影响：保留历史，将原单标记为已撤单" : "原单明细对照（修改会完整替换明细）"));
         const list = element("ul");
         for (const line of order.items || []) list.append(element("li", "", `${displayValue(line.name)} / ${displayValue(line.sku)} · ${displayValue(line.quantity)} ${displayValue(line.unit)} × ${displayValue(line.unit_price)} · 明细 ${displayValue(line.line_id)}`));
         snapshot.append(list);
@@ -1362,7 +1417,7 @@
             "input, select, button",
         ))
             node.disabled =
-                busy || selectedTask()?.status !== "review_required";
+                busy || selectedTask()?.status !== "review_required" || node.dataset.unavailable === "true";
         for (const node of byId("review-form").querySelectorAll(
             "input, button",
         ))
@@ -2063,6 +2118,8 @@
             if ((dialog.id === "upload-dialog" && state.operations.has("upload")) || (taskId && state.operations.has(`task:${taskId}`))) event.preventDefault();
         });
         dialog.addEventListener("close", () => {
+            // Native close events are queued and can arrive after the dialog reopens.
+            if (dialog.open) return;
             const target = state.dialogFocus.get(dialog.id);
             state.dialogFocus.delete(dialog.id);
             if (dialog.id === "confirm-dialog") state.confirmTarget = null;

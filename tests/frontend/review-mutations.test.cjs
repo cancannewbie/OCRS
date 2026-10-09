@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { setup, makeTask, makeEvent, json, deferred, flush } = require("./helpers.cjs");
+const { setup, makeTask, makeEvent, makeOrder, json, deferred, flush } = require("./helpers.cjs");
 
 const confirmPath = "/api/tasks/task-1/confirm";
 
@@ -219,4 +219,269 @@ test("an old confirmation body cannot erase a replacement session's draft", asyn
     assert.equal(app.field("客户").value, "Synthetic replacement-session draft");
     assert.match(app.id("draft-state").textContent, /未提交/);
     assert.doesNotMatch(app.id("notice-text").textContent, /审核已保存|已确认入账/);
+});
+
+
+function orderChangeFixtures(action = "amend") {
+    const line = { ...makeEvent().items[0], line_id: "synthetic-line-original" };
+    const order = makeOrder({ id: "synthetic-order-original", status: "confirmed", items: [line] });
+    const event = makeEvent({
+        action,
+        target_order_id: order.id,
+        expected_order_version: 1,
+        reason: "Synthetic order change",
+        items: [{ ...line }],
+    });
+    const task = makeTask({ candidate: { schema_version: "1", events: [event], warnings: [], missing_reasons: [] } });
+    return { tasks: [task], orders: [order] };
+}
+
+function comparison(app) {
+    const node = app.document.querySelector(".target-comparison");
+    assert.ok(node, "Missing target order comparison");
+    return node;
+}
+
+function useOrderVersion(app) {
+    const button = comparison(app).querySelector('[data-action="use-order-version"]');
+    assert.ok(button, "Missing explicit order version action");
+    return button;
+}
+
+test("order-only refresh updates comparisons and suggestions without replacing dirty inputs", async (t) => {
+    const fixtures = orderChangeFixtures();
+    fixtures.tasks.push(makeTask({ id: "task-2", sources: [] }));
+    const app = await ready(t, fixtures);
+    app.fill(app.field("客户"), "Synthetic local customer");
+    app.fill(app.field("数量"), "7.125");
+    const customer = app.field("客户");
+    const version = app.field("目标订单当前版本");
+    customer.focus();
+    customer.setSelectionRange(4, 9);
+    Object.assign(app.server.orders[0], { version: 2, customer: "Synthetic remote customer" });
+    app.server.orders[0].items[0].quantity = "9.25";
+    await app.click("refresh-button");
+    assert.equal(app.server.tasks[0].version, 1);
+    assert.match(comparison(app).textContent, /Synthetic remote customer/);
+    assert.match(comparison(app).textContent, /9\.25/);
+    assert.match(comparison(app).textContent, /当前版本 v2/);
+    assert.match(comparison(app).textContent, /本次提交版本 v1/);
+    assert.match(comparison(app).textContent, /版本不一致/);
+    assert.equal(app.id("order-suggestions").options[0].label, "Synthetic remote customer · v2 · 已确认");
+    assert.equal(app.field("客户"), customer);
+    assert.equal(app.field("目标订单当前版本"), version);
+    assert.equal(app.document.activeElement, customer);
+    assert.equal(customer.selectionStart, 4);
+    assert.equal(customer.selectionEnd, 9);
+    assert.equal(customer.value, "Synthetic local customer");
+    assert.equal(version.value, "1");
+    assert.equal(app.field("数量").value, "7.125");
+    assert.equal(app.field("明细 ID（已有明细保留）").value, "synthetic-line-original");
+    assert.equal(app.calls(confirmPath).length, 0);
+    await app.select("task-2");
+    await app.select("task-1");
+    assert.match(comparison(app).textContent, /Synthetic remote customer/);
+    assert.equal(app.field("客户").value, "Synthetic local customer");
+    assert.equal(app.field("目标订单当前版本").value, "1");
+    assert.equal(app.field("数量").value, "7.125");
+    assert.equal(app.id("review-actor").value, "Synthetic reviewer");
+    assert.equal(app.id("review-reason").value, "Synthetic verification");
+});
+
+test("explicit version adoption changes only the expected version and retains input nodes", async (t) => {
+    const fixtures = orderChangeFixtures();
+    fixtures.tasks[0].candidate.events[0].expected_order_version = null;
+    const app = await ready(t, fixtures);
+    app.fill(app.field("客户"), "Synthetic manually reviewed customer");
+    const customer = app.field("客户");
+    const version = app.field("目标订单当前版本");
+    const lineId = app.field("明细 ID（已有明细保留）");
+    customer.focus();
+    customer.setSelectionRange(3, 8);
+    app.server.orders[0].version = 3;
+    await app.click("refresh-button");
+    assert.equal(version.value, "");
+    assert.match(useOrderVersion(app).textContent, /v3/);
+    useOrderVersion(app).click();
+    await flush();
+    assert.equal(app.field("客户"), customer);
+    assert.equal(app.document.activeElement, customer);
+    assert.equal(customer.selectionStart, 3);
+    assert.equal(customer.selectionEnd, 8);
+    assert.equal(app.field("目标订单当前版本"), version);
+    assert.equal(version.value, "3");
+    assert.equal(version.parentElement.querySelector(".field-null").hidden, true);
+    assert.equal(app.field("明细 ID（已有明细保留）"), lineId);
+    assert.equal(lineId.value, "synthetic-line-original");
+    assert.equal(customer.value, "Synthetic manually reviewed customer");
+    assert.equal(app.calls(confirmPath).length, 0);
+    app.fill(version, "1");
+    assert.match(comparison(app).textContent, /本次提交版本 v1/);
+    assert.match(comparison(app).textContent, /版本不一致/);
+    app.server.orders[0].version = 4;
+    await app.click("refresh-button");
+    assert.equal(version.value, "1");
+    useOrderVersion(app).click();
+    await flush();
+    assert.equal(version.value, "4");
+    assert.match(comparison(app).textContent, /本次提交版本 v4/);
+    assert.doesNotMatch(comparison(app).textContent, /版本不一致/);
+    assert.equal(app.calls(confirmPath).length, 0);
+});
+
+test("order version conflict keeps the draft and recovers only after explicit version review and resubmission", async (t) => {
+    const app = await ready(t, orderChangeFixtures());
+    app.fill(app.field("客户"), "Synthetic conflict draft");
+    app.fill(app.field("数量"), "7.125");
+    const customer = app.field("客户");
+    const version = app.field("目标订单当前版本");
+    app.on(confirmPath, () => {
+        Object.assign(app.server.orders[0], { version: 2, customer: "Synthetic concurrently amended customer" });
+        return json({ error: { code: "VERSION_CONFLICT" } }, 409);
+    });
+    await app.confirm();
+    assert.equal(app.calls(confirmPath).length, 1);
+    assert.equal(app.id("confirm-dialog").open, true);
+    assert.match(app.id("confirm-error").textContent, /VERSION_CONFLICT/);
+    assert.equal(app.server.tasks[0].status, "review_required");
+    assert.equal(app.server.tasks[0].version, 1);
+    assert.equal(app.field("客户"), customer);
+    assert.equal(customer.value, "Synthetic conflict draft");
+    assert.equal(version.value, "1");
+    assert.match(comparison(app).textContent, /Synthetic concurrently amended customer/);
+    assert.match(comparison(app).textContent, /本次提交版本 v1/);
+    assert.match(comparison(app).textContent, /当前版本 v2/);
+    assert.match(comparison(app).textContent, /版本不一致/);
+    await app.click("confirm-cancel");
+    assert.equal(app.field("数量").value, "7.125");
+    assert.equal(app.field("明细 ID（已有明细保留）").value, "synthetic-line-original");
+    useOrderVersion(app).click();
+    await flush();
+    assert.equal(app.field("客户"), customer);
+    assert.equal(app.field("目标订单当前版本"), version);
+    assert.equal(version.value, "2");
+    assert.equal(app.calls(confirmPath).length, 1);
+    app.on(confirmPath, ({ options }) => {
+        const body = JSON.parse(options.body);
+        assert.equal(body.events[0].expected_order_version, app.server.orders[0].version);
+        Object.assign(app.server.orders[0], body.events[0], { version: 3 });
+        Object.assign(app.server.tasks[0], { status: "confirmed", version: 2 });
+        return json({ orders: [app.server.orders[0].id] });
+    });
+    await app.confirm();
+    assert.equal(app.calls(confirmPath).length, 2);
+    const [first, second] = app.calls(confirmPath).map((call) => JSON.parse(call.options.body));
+    assert.equal(first.events[0].expected_order_version, 1);
+    assert.equal(second.events[0].expected_order_version, 2);
+    assert.notEqual(first.idempotency_key, second.idempotency_key);
+    assert.deepEqual(second.events[0], { ...first.events[0], expected_order_version: 2 });
+    assert.equal(app.server.orders.length, 1);
+    assert.equal(app.server.orders[0].version, 3);
+    assert.equal(app.id("confirm-dialog").open, false);
+});
+
+for (const action of ["amend", "cancel"]) {
+    test(`${action} shows cancelled targets after conflict and does not re-enable version adoption`, async (t) => {
+        const app = await ready(t, orderChangeFixtures(action));
+        const version = app.field("目标订单当前版本");
+        app.on(confirmPath, () => {
+            Object.assign(app.server.orders[0], { version: 2, status: "cancelled" });
+            return json({ error: { code: "VERSION_CONFLICT" } }, 409);
+        }, { once: false });
+        await app.confirm();
+        assert.match(comparison(app).textContent, /目标订单已撤单/);
+        assert.match(comparison(app).textContent, /不能再次修改或撤销/);
+        assert.equal(useOrderVersion(app).disabled, true);
+        assert.equal(version.value, "1");
+        assert.equal(app.field("目标订单当前版本"), version);
+        assert.equal(app.calls(confirmPath).length, 1);
+        await app.click("confirm-cancel");
+        useOrderVersion(app).click();
+        await flush();
+        assert.equal(version.value, "1");
+        app.fill(version, "2");
+        await app.confirm();
+        assert.equal(app.calls(confirmPath).length, 2);
+        assert.equal(app.server.tasks[0].status, "review_required");
+        assert.equal(app.server.orders[0].status, "cancelled");
+        assert.equal(useOrderVersion(app).disabled, true);
+        assert.match(app.id("confirm-error").textContent, /VERSION_CONFLICT/);
+    });
+}
+
+test("a delayed close event cannot discard a freshly reopened confirmation", async (t) => {
+    const app = await ready(t);
+    const delayedClose = [];
+    app.window.HTMLDialogElement.prototype.close = function () {
+        this.open = false;
+        delayedClose.push(() => app.dispatch(this, "close"));
+    };
+    const dialog = app.id("confirm-dialog");
+    await app.submit("review-form");
+    await app.click("confirm-cancel");
+    assert.equal(dialog.open, false);
+    app.fill(app.field("客户"), "Synthetic reopened confirmation");
+    await app.submit("review-form");
+    assert.equal(dialog.open, true);
+    assert.equal(app.document.activeElement, app.id("confirm-cancel"));
+    delayedClose.shift()();
+    await flush();
+    assert.equal(app.document.activeElement, app.id("confirm-cancel"));
+    await app.click("confirm-submit");
+    assert.equal(app.calls(confirmPath).length, 1);
+    assert.equal(JSON.parse(app.calls(confirmPath)[0].options.body).events[0].customer, "Synthetic reopened confirmation");
+    assert.equal(app.server.tasks[0].status, "confirmed");
+});
+
+test("an earlier dialog's delayed close preserves a different dialog's target and focus", async (t) => {
+    const app = await ready(t);
+    const delayedClose = [];
+    app.window.HTMLDialogElement.prototype.close = function () {
+        this.open = false;
+        delayedClose.push(() => app.dispatch(this, "close"));
+    };
+    await app.submit("review-form");
+    await app.click("confirm-cancel");
+    await app.click("reject-button");
+    app.fill(app.id("reject-reason"), "Synthetic rejection after cancelled confirmation");
+    assert.equal(app.document.activeElement, app.id("reject-reason"));
+    delayedClose.shift()();
+    await flush();
+    assert.equal(app.id("reject-dialog").open, true);
+    assert.equal(app.document.activeElement, app.id("reject-reason"));
+    await app.submit("reject-form");
+    const calls = app.calls("/api/tasks/task-1/reject");
+    assert.equal(calls.length, 1);
+    assert.equal(JSON.parse(calls[0].options.body).reason, "Synthetic rejection after cancelled confirmation");
+    assert.equal(app.calls(confirmPath).length, 0);
+});
+
+test("old-session close events preserve a reopened dialog's new focus destination and payload", async (t) => {
+    const app = await ready(t);
+    const delayedClose = [];
+    app.window.HTMLDialogElement.prototype.close = function () {
+        this.open = false;
+        delayedClose.push(() => app.dispatch(this, "close"));
+    };
+    app.id("review-actor").focus();
+    await app.submit("review-form");
+    await app.click("logout-button");
+    assert.equal(app.id("confirm-dialog").open, false);
+    await app.login();
+    await app.select();
+    app.reviewer();
+    app.fill(app.field("客户"), "Synthetic replacement-session confirmation");
+    app.id("confirm-button").focus();
+    await app.submit("review-form");
+    delayedClose.shift()();
+    await flush();
+    assert.equal(app.id("confirm-dialog").open, true);
+    assert.equal(app.document.activeElement, app.id("confirm-cancel"));
+    await app.click("confirm-cancel");
+    delayedClose.shift()();
+    await flush();
+    assert.equal(app.document.activeElement, app.id("confirm-button"));
+    await app.confirm();
+    assert.equal(app.calls(confirmPath).length, 1);
+    assert.equal(JSON.parse(app.calls(confirmPath)[0].options.body).events[0].customer, "Synthetic replacement-session confirmation");
 });
