@@ -1,0 +1,47 @@
+# Local secrets (commit examples only after checking their contents)
+.env
+.env.*
+!.env.example
+!.env.*.example
+secrets/
+credentials/
+
+# Local customer data and generated exports; use synthetic test fixtures only
+data/
+screenshots/
+exports/
+uploads/
+backups/
+logs/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Python environments, caches, and generated artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Optional web tooling artifacts
+node_modules/
+coverage/
+
+# Local editor and OS artifacts
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
