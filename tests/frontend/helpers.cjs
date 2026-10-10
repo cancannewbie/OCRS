@@ -215,11 +215,25 @@ function setup(t, options = {}) {
         if (/^\/api\/orders\/[^/]+\/history$/.test(entry.path))
             return json({ events: [{ id: "event-1", action: "create", actor: "Synthetic reviewer", reason: "Synthetic verification", created_at: "2026-10-09T00:00:00Z", version: 1 }] });
         if (entry.path === "/api/uploads") return json({ tasks: copy(server.tasks), duplicates: [] });
-        const taskRoute = entry.path.match(/^\/api\/tasks\/([^/]+)\/(confirm|retry|reject)$/);
+        const taskRoute = entry.path.match(/^\/api\/tasks\/([^/]+)\/(confirm|retry|reject|candidate|reopen)$/);
         if (taskRoute) {
             const task = server.tasks.find((item) => item.id === decodeURIComponent(taskRoute[1]));
             assert.ok(task, "Mutation targeted a fixture task that does not exist");
             const body = JSON.parse(fetchOptions.body);
+            if (["candidate", "reopen"].includes(taskRoute[2])) {
+                if (body.expected_version !== task.version) return json({ error: { code: "VERSION_CONFLICT" } }, 409);
+                if (!(taskRoute[2] === "reopen" ? task.status === "rejected" : ["rejected", "review_required"].includes(task.status))) return json({ error: { code: "STATE_CONFLICT" } }, 409);
+                if (!task.candidate) return json({ error: { code: "CANDIDATE_REQUIRED" } }, 409);
+                const previousStatus = task.status;
+                task.model_candidate ||= copy(task.candidate);
+                task.version += 1;
+                if (taskRoute[2] === "candidate") {
+                    task.candidate = copy(body.candidate);
+                    (task.candidate_revisions ||= []).push({ version: task.version, actor: body.actor, reason: body.reason, candidate: copy(body.candidate), created_at: "2026-10-10T00:00:00Z" });
+                } else task.status = "review_required";
+                (task.review_history ||= []).push({ id: `audit-${task.version}`, kind: taskRoute[2] === "candidate" ? "candidate_saved" : "review_reopened", actor: body.actor, reason: body.reason, task_version: task.version, from_status: previousStatus, to_status: task.status, created_at: "2026-10-10T00:00:00Z" });
+                return json({ id: task.id, status: task.status, version: task.version });
+            }
             if (taskRoute[2] === "confirm") {
                 task.status = "confirmed";
                 task.version += 1;

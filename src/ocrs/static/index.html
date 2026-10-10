@@ -495,6 +495,12 @@
                                     0 个任务
                                 </span>
                             </div>
+                            <div class="queue-selection-bar">
+                                <span id="queue-selection-count" role="status">已选 0 个 · 仅当前页</span>
+                                <span class="tiny muted">换筛选、翻页或手动刷新会清空选择。按所选任务逐条核对并保存。</span>
+                                <button id="queue-edit-selected" class="button small primary" type="button" disabled>逐条编辑已选</button>
+                                <button id="queue-clear-selection" class="button small secondary" type="button" disabled>清空选择</button>
+                            </div>
                             <div id="task-list" class="task-list" aria-live="polite">
                             </div>
                             <div class="queue-footer">
@@ -629,6 +635,7 @@
                                     </div>
                                     <div id="task-alerts">
                                     </div>
+                                    <div id="task-review-history" hidden></div>
                                     <div id="editor-content" class="editor-content">
                                     </div>
                                     <form id="review-form" class="review-footer" hidden>
@@ -654,10 +661,12 @@
                                                 />
                                             </label>
                                         </div>
-                                        <p class="field-help">
+                                        <p id="review-save-note" class="field-help">
                                             提交后保存正式订单与审核记录。缺失值保持为空，不自动补数量或价格。
                                         </p>
                                         <div class="review-actions">
+                                            <button id="cancel-edit-button" class="button secondary" type="button">取消编辑</button>
+                                            <button id="save-candidate-button" class="button secondary" type="button" disabled>保存修正</button>
                                             <button
                                                 id="reject-button"
                                                 class="button danger-quiet"
@@ -1048,6 +1057,22 @@
                     仍然保存本次审核
                 </button>
             </div>
+        </dialog>
+        <dialog id="reopen-dialog" class="modal" aria-labelledby="reopen-title">
+            <form id="reopen-form">
+                <div class="modal-heading"><h2 id="reopen-title">重新发起审核？</h2></div>
+                <p id="reopen-scope"></p>
+                <p>恢复待审核并保留原驳回原因及修正历史。不重新识别、不生成正式订单，仍需人工核对并确认。</p>
+                <label for="reopen-actor">操作人</label>
+                <input id="reopen-actor" required maxlength="100" autocomplete="off" />
+                <label for="reopen-reason">复审原因</label>
+                <textarea id="reopen-reason" required maxlength="500" rows="3" placeholder="说明为什么重新发起审核"></textarea>
+                <p id="reopen-error" class="form-error" role="alert" hidden></p>
+                <div class="modal-actions">
+                    <button id="reopen-cancel" class="button secondary" type="button">取消</button>
+                    <button id="reopen-submit" class="button primary" type="submit">确认提交复审</button>
+                </div>
+            </form>
         </dialog>
         <dialog id="reject-dialog" class="modal" aria-labelledby="reject-title">
             <form id="reject-form">

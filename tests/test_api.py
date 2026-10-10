@@ -69,6 +69,8 @@ def ready_payload(client: TestClient) -> tuple[dict[str, Any], dict[str, Any]]:
         ("POST", "/api/tasks/example/retry"),
         ("POST", "/api/tasks/example/reject"),
         ("POST", "/api/tasks/example/confirm"),
+        ("PUT", "/api/tasks/example/candidate"),
+        ("POST", "/api/tasks/example/reopen"),
         ("GET", "/api/orders"),
         ("GET", "/api/orders/example/history"),
         ("POST", "/api/export"),

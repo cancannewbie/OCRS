@@ -26,6 +26,8 @@
             "字段未通过校验。请检查必填项、数量、金额与时间格式。",
         INVALID_REQUEST: "请求未通过校验，请检查输入内容。",
         TASK_NOT_REVIEWABLE: "当前任务状态不支持审核，请刷新查看。",
+        STATE_CONFLICT: "任务状态已变化，请刷新核对后再操作。",
+        CANDIDATE_REQUIRED: "这条任务没有识别候选，无法恢复审核。请核对原图及识别结果。",
         TASK_NOT_RETRYABLE: "当前任务状态不支持重新识别，请刷新查看。",
         TASK_NOT_FOUND: "找不到这条任务，请刷新列表。",
         ORDER_NOT_FOUND: "找不到目标订单，请核对正式订单的内部编号。",
@@ -82,6 +84,9 @@
         orders: [],
         status: null,
         selectedId: null,
+        checkedIds: new Set(),
+        editingIds: [],
+        reopenTarget: null,
         drafts: new Map(),
         operations: new Set(),
         controllers: new Set(),
@@ -95,6 +100,7 @@
         attentionTasks: [],
         taskPage: { total: 0, limit: 50, offset: 0, has_more: false },
         queryGeneration: 0,
+        selectionGeneration: null,
         detailGeneration: 0,
         historyGeneration: 0,
         refreshPending: false,
@@ -112,6 +118,7 @@
         lastRenderKey: null,
         lastQueueKey: null,
         lastOrdersKey: null,
+        lastHistoryKey: null,
     };
 
     function element(tag, className, content) {
@@ -353,6 +360,9 @@
         byId("model-test-confirm").disabled = false;
         byId("model-test-cancel").disabled = false;
         state.selectedId = null;
+        state.checkedIds.clear();
+        state.editingIds = [];
+        state.reopenTarget = null;
         state.taskCache.clear();
         state.taskPage = { total: 0, limit: 50, offset: 0, has_more: false };
         state.queryGeneration += 1;
@@ -368,13 +378,16 @@
         state.lastRenderKey = null;
         state.lastQueueKey = null;
         state.lastOrdersKey = null;
+        state.lastHistoryKey = null;
+        state.selectionGeneration = null;
         state.view = "dashboard";
         state.reviewDetail = false;
         for (const dialog of document.querySelectorAll("dialog")) closeDialog(dialog.id);
         state.dialogFocus.clear();
-        for (const id of ["task-list", "source-list", "editor-content", "orders-content", "selected-files", "dashboard-tasks", "settings-config", "order-history-content", "confirm-summary", "task-alerts", "task-action-footer", "task-meta", "source-summary", "duplicate-detail", "inbox-error-list", "notice-text"])
+        for (const id of ["task-list", "source-list", "editor-content", "orders-content", "selected-files", "dashboard-tasks", "settings-config", "order-history-content", "confirm-summary", "task-alerts", "task-action-footer", "task-meta", "source-summary", "duplicate-detail", "inbox-error-list", "notice-text", "task-review-history", "reopen-scope", "reopen-error"])
             byId(id).replaceChildren();
-        for (const id of ["upload-form", "review-form", "reject-form"]) byId(id).reset();
+        byId("task-review-history").hidden = true;
+        for (const id of ["upload-form", "review-form", "reject-form", "reopen-form"]) byId(id).reset();
         for (const id of ["upload-files", "source-label", "upload-submit", "close-upload", "cancel-upload", "confirm-submit", "confirm-cancel", "reject-submit", "reject-cancel", "duplicate-cancel"]) byId(id).disabled = false;
         byId("upload-submit").textContent = "上传并识别";
         byId("duplicate-confirm").disabled = true;
@@ -472,12 +485,13 @@
                 state.status = status;
                 state.orders = Array.isArray(orderData.orders) ? orderData.orders : [];
                 if (generation === state.queryGeneration) {
+                    state.selectionGeneration = generation;
                     state.tasks = Array.isArray(taskData.tasks) ? taskData.tasks : [];
                     state.taskPage.total = taskData.total ?? state.tasks.length;
                     state.taskPage.has_more = taskData.has_more ?? false;
-                    for (const task of state.tasks) state.taskCache.set(task.id, task);
+                    for (const task of state.tasks) cacheTask(task);
                 }
-                if (selected && selectedId === state.selectedId) state.taskCache.set(selected.id, selected);
+                if (selected && selectedId === state.selectedId) cacheTask(selected);
                 if (attention) {
                     state.attentionTasks = Array.isArray(attention.tasks) ? attention.tasks : [];
                     for (const task of state.attentionTasks) state.taskCache.set(task.id, task);
@@ -643,12 +657,54 @@
         return state.taskCache.get(state.selectedId) || state.tasks.find((task) => task.id === state.selectedId);
     }
 
+    function cacheTask(task) {
+        const previous = state.taskCache.get(task.id);
+        if (previous && previous.version > task.version) return previous;
+        const result = previous?.version === task.version ? { ...previous, ...task } : task;
+        state.taskCache.set(task.id, result);
+        return result;
+    }
+
+    function canEditTask(task) {
+        return ["review_required", "rejected"].includes(task.status) && !!task.candidate && !task.sources?.some((source) => source.expired);
+    }
+
+    function clearQueueSelection() {
+        state.checkedIds.clear();
+        state.editingIds = [];
+        renderQueue();
+    }
+
+    function selectionTasks() {
+        return state.tasks.filter((task) => state.checkedIds.has(task.id) && canEditTask(task));
+    }
+
+    function editTask(id, selected = false) {
+        if (!selected) state.editingIds = [];
+        const task = state.taskCache.get(id);
+        if (task && canEditTask(task)) {
+            draftFor(task).editing = true;
+            state.lastRenderKey = null;
+        }
+        void selectTask(id);
+    }
+
     function renderQueue() {
         const list = byId("task-list");
-        const key = JSON.stringify([state.tasks, state.taskPage, state.selectedId]);
+        const generation = state.queryGeneration;
+        const selectionReady = state.selectionGeneration === generation;
+        const eligible = state.tasks.filter(canEditTask);
+        const visibleIds = new Set(eligible.map((task) => task.id));
+        for (const id of state.checkedIds) if (!visibleIds.has(id)) state.checkedIds.delete(id);
+        const count = state.checkedIds.size;
+        byId("queue-selection-count").textContent = `已选 ${count} 个 · 仅当前页`;
+        byId("queue-edit-selected").disabled = !count || !selectionReady;
+        byId("queue-clear-selection").disabled = !count;
+        const key = JSON.stringify([state.tasks, state.taskPage, state.selectedId, [...state.checkedIds], generation, selectionReady]);
         if (key === state.lastQueueKey) return;
         state.lastQueueKey = key;
         const focusId = document.activeElement?.dataset?.taskId;
+        const focusClass = document.activeElement?.className;
         list.replaceChildren();
         byId("queue-count").textContent = `${state.taskPage.total} 个任务`;
         if (!state.tasks.length) {
@@ -658,26 +714,66 @@
             table.setAttribute("aria-label", "截图识别任务列表");
             const head = element("thead");
             const headings = element("tr");
-            for (const title of ["任务 / 客户", "来源", "候选动作", "处理状态", "导入时间"]) {
+            const selectionHead = element("th", "selection-cell");
+            selectionHead.scope = "col";
+            const selectAll = element("input");
+            selectAll.type = "checkbox"; selectAll.id = "queue-select-all";
+            selectAll.setAttribute("aria-label", "选择本页可编辑任务");
+            selectAll.checked = !!eligible.length && count === eligible.length;
+            selectAll.indeterminate = count > 0 && count < eligible.length;
+            selectAll.disabled = !eligible.length || !selectionReady;
+            selectAll.addEventListener("change", () => {
+                if (generation !== state.queryGeneration || state.selectionGeneration !== generation) return;
+                for (const task of eligible) {
+                    if (selectAll.checked) state.checkedIds.add(task.id);
+                    else state.checkedIds.delete(task.id);
+                }
+                renderQueue(); byId("queue-select-all")?.focus();
+            });
+            selectionHead.append(selectAll); headings.append(selectionHead);
+            for (const title of ["任务 / 客户", "来源", "候选动作", "处理状态", "导入时间", "操作"]) {
                 const th = element("th", "", title); th.scope = "col"; headings.append(th);
             }
             head.append(headings); table.append(head);
             const body = element("tbody");
             for (const task of state.tasks) {
-                const row = element("tr");
+                const row = element("tr", state.checkedIds.has(task.id) ? "selected" : "");
+                const selection = element("td", "selection-cell");
+                const checkbox = element("input", "task-select");
+                checkbox.type = "checkbox"; checkbox.dataset.taskId = task.id;
+                checkbox.checked = state.checkedIds.has(task.id);
+                checkbox.disabled = !canEditTask(task) || !selectionReady;
+                checkbox.setAttribute("aria-label", `选择任务 ${shortId(task.id)}，${labelStatus(task.status)}`);
+                checkbox.addEventListener("change", () => {
+                    if (generation !== state.queryGeneration || state.selectionGeneration !== generation || !canEditTask(task)) return;
+                    if (checkbox.checked) state.checkedIds.add(task.id);
+                    else state.checkedIds.delete(task.id);
+                    renderQueue();
+                });
+                selection.append(checkbox);
                 const titleCell = element("td");
                 const title = task.candidate?.events?.[0]?.customer || task.sources?.[0]?.filename || "截图识别任务";
                 const button = element("button", `task-card${task.id === state.selectedId ? " active" : ""}`, title);
                 button.type = "button"; button.dataset.taskId = task.id;
                 button.setAttribute("aria-label", `审核任务：${title}，${labelStatus(task.status)}`);
-                button.addEventListener("click", () => selectTask(task.id));
+                button.addEventListener("click", () => { state.editingIds = []; void selectTask(task.id); });
                 titleCell.append(button, element("small", "", `#${shortId(task.id)} · v${task.version}`));
                 const source = element("td", "", task.sources?.[0]?.source_label || task.sources?.[0]?.filename || "手动导入");
                 source.append(element("small", "", `${task.sources?.length || 0} 张截图`));
                 const types = Array.from(new Set((task.candidate?.events || []).map((event) => actionLabel(event.action))));
                 const actions = element("td", "action-types", types.join(" / ") || "等待候选");
                 const status = element("td"); status.append(badge(task.status));
-                row.append(titleCell, source, actions, status, element("td", "", localDate(task.created_at)));
+                const operation = element("td", "queue-operation");
+                const edit = actionButton(canEditTask(task) ? "编辑" : "查看", "secondary small task-edit", () => {
+                    if (generation !== state.queryGeneration || state.selectionGeneration !== generation) return;
+                    if (canEditTask(task)) editTask(task.id);
+                    else { state.editingIds = []; void selectTask(task.id); }
+                });
+                edit.dataset.taskId = task.id;
+                edit.disabled = !selectionReady;
+                edit.setAttribute("aria-label", `${canEditTask(task) ? "编辑" : "查看"}任务 ${shortId(task.id)}`);
+                operation.append(edit);
+                row.append(selection, titleCell, source, actions, status, element("td", "queue-date", localDate(task.created_at)), operation);
                 body.append(row);
             }
             table.append(body); list.append(table);
@@ -692,19 +788,21 @@
         next.disabled = !state.taskPage.has_more;
         pagination.append(element("span", "", `第 ${page} / ${pages} 页 · 每页 ${state.taskPage.limit} 条`), previous, next);
         list.append(pagination);
-        if (focusId) Array.from(list.querySelectorAll("[data-task-id]")).find((button) => button.dataset.taskId === focusId)?.focus();
+        if (focusId) Array.from(list.querySelectorAll("[data-task-id]")).find((button) => button.dataset.taskId === focusId && button.className === focusClass)?.focus();
         updateTaskNavigation();
     }
 
     function changePage(direction) {
         state.taskPage.offset = Math.max(0, state.taskPage.offset + direction * state.taskPage.limit);
         state.queryGeneration += 1;
+        clearQueueSelection();
         void refresh();
     }
 
     function queryChanged() {
         state.taskPage.offset = 0;
         state.queryGeneration += 1;
+        clearQueueSelection();
         void refresh();
     }
 
@@ -730,16 +828,15 @@
             byId("review-form").hidden = true;
             revokeImages();
             byId("source-list").replaceChildren();
-            try {
-                const task = await request(`/api/tasks/${encodeURIComponent(id)}`);
-                if (epoch !== state.epoch || generation !== state.detailGeneration) return;
-                state.taskCache.set(task.id, task);
-                renderSelectedTask(task);
-            } catch (error) {
-                if (epoch !== state.epoch || generation !== state.detailGeneration) return;
-                reportError(error);
-                byId("editor-content").replaceChildren(element("p", "task-description", "任务读取失败，请返回队列后重试。"));
-            }
+        }
+        try {
+            const task = await request(`/api/tasks/${encodeURIComponent(id)}`);
+            if (epoch !== state.epoch || generation !== state.detailGeneration) return;
+            renderSelectedTask(cacheTask(task));
+        } catch (error) {
+            if (epoch !== state.epoch || generation !== state.detailGeneration) return;
+            reportError(error);
+            if (!cached) byId("editor-content").replaceChildren(element("p", "task-description", "任务读取失败，请返回队列后重试。"));
         }
         if (epoch === state.epoch && generation === state.detailGeneration) {
             updateTaskNavigation();
@@ -747,17 +844,28 @@
         }
     }
 
+    function navigationTasks() {
+        return state.editingIds.length
+            ? state.editingIds.map((id) => state.taskCache.get(id)).filter(Boolean)
+            : state.tasks;
+    }
+
     function updateTaskNavigation() {
-        const index = state.tasks.findIndex((task) => task.id === state.selectedId);
+        const tasks = navigationTasks();
+        const index = tasks.findIndex((task) => task.id === state.selectedId);
         byId("previous-task").disabled = index <= 0;
-        byId("next-task").disabled = index < 0 || index >= state.tasks.length - 1;
-        byId("detail-position").textContent = index >= 0 ? `本页 ${index + 1} / ${state.tasks.length}` : "当前任务";
+        byId("next-task").disabled = index < 0 || index >= tasks.length - 1;
+        byId("detail-position").textContent = index >= 0 ? `${state.editingIds.length ? "选中" : "本页"} ${index + 1} / ${tasks.length}` : "当前任务";
     }
 
     function navigateTask(direction) {
-        const index = state.tasks.findIndex((task) => task.id === state.selectedId);
-        const task = state.tasks[index + direction];
-        if (index >= 0 && task) void selectTask(task.id);
+        const tasks = navigationTasks();
+        const index = tasks.findIndex((task) => task.id === state.selectedId);
+        const task = tasks[index + direction];
+        if (index >= 0 && task) {
+            if (state.editingIds.length) editTask(task.id, true);
+            else void selectTask(task.id);
+        }
     }
 
     function showQueue() {
@@ -790,6 +898,8 @@
                 actor: "",
                 reason: "",
                 request: null,
+                saveRequest: null,
+                editing: false,
             };
             state.drafts.set(task.id, draft);
         }
@@ -799,8 +909,10 @@
     function markDirty(draft) {
         draft.dirty = true;
         draft.request = null;
+        draft.saveRequest = null;
         byId("draft-state").textContent = "有未提交修改";
         byId("draft-state").classList.add("changed");
+        updateReviewActions();
     }
 
     function renderSelectedTask(task, force = false) {
@@ -812,21 +924,24 @@
         byId("version-warning").hidden = !conflict;
         byId("confirm-button").disabled =
             conflict || state.operations.has(`task:${task.id}`);
-        const renderKey = `${task.id}:${task.version}:${task.status}`;
+        renderReviewHistory(task);
+        updateReviewActions();
+        const statusBadge = byId("task-status");
+        statusBadge.className = `badge ${Object.hasOwn(STATUS_LABELS, task.status) ? task.status : ""}`;
+        statusBadge.textContent = labelStatus(task.status);
+        byId("task-meta").textContent =
+            `#${shortId(task.id)} · v${task.version} · ${localDate(task.created_at)}`;
+        const renderKey = `${task.id}:${task.version}:${task.status}:${draft.editing}`;
         // Orders can change independently of the candidate task. Refresh references
         // without replacing draft controls, their focus, or their selection.
         if (!force && (state.lastRenderKey === renderKey || (
             state.lastRenderKey?.startsWith(`${task.id}:`) && draft.dirty && conflict
         ))) {
             updateOrderReferences(task, draft);
+            setTaskBusy(task.id, state.operations.has(`task:${task.id}`));
             return;
         }
         state.lastRenderKey = renderKey;
-        const statusBadge = byId("task-status");
-        statusBadge.className = `badge ${Object.hasOwn(STATUS_LABELS, task.status) ? task.status : ""}`;
-        statusBadge.textContent = labelStatus(task.status);
-        byId("task-meta").textContent =
-            `#${shortId(task.id)} · v${task.version} · ${localDate(task.created_at)}`;
         byId("source-summary").textContent =
             `${task.sources?.length || 0} 张截图 · 仅供核对`;
         byId("draft-state").textContent = draft.dirty
@@ -1023,12 +1138,20 @@
         const actions = byId("task-action-footer");
         content.replaceChildren();
         actions.replaceChildren();
-        const editable = task.status === "review_required";
+        const editable = canEditTask(task) && (task.status === "review_required" || (task.status === "rejected" && draft.editing));
         byId("review-form").hidden = !editable;
         byId("review-actor").value = draft.actor;
         byId("review-reason").value = draft.reason;
+        byId("review-save-note").textContent = task.status === "rejected"
+            ? "保存修正仍保留已驳回状态。提交复审只恢复待审核，不重新识别，不生成正式订单。"
+            : "保存修正仅保留候选。核对并提交后才生成正式订单；未知字段保持为空。";
         if (!editable) {
             const description = element("div", "task-description");
+            if (["rejected", "review_required"].includes(task.status) && !canEditTask(task)) {
+                description.append(element("p", "", task.sources?.some((source) => source.expired)
+                    ? "原始证据已清理，无法编辑、提交复审或确认订单。"
+                    : "这条任务没有识别候选，无法保存修正或提交复审。"));
+            }
             if (isProcessing(task.status)) {
                 description.append(
                     element("div", "pending-icon"),
@@ -1078,12 +1201,20 @@
                     element(
                         "p",
                         "",
-                        "本任务不生成正式订单，原始任务记录仍保留。",
+                        "原驳回原因和历史仍保留。可编辑并保存修正，再明确提交复审；不会重新识别或生成正式订单。",
                     ),
                 );
+                const edit = actionButton("编辑修正", "secondary", () => editTask(task.id));
+                edit.id = "edit-rejected-button";
+                const reopen = actionButton("提交复审", "primary", () => openReopen(task));
+                reopen.id = "reopen-button";
+                actions.append(edit, reopen);
             }
             content.append(description);
-            if (!task.candidate?.events?.length) return;
+            if (!task.candidate?.events?.length) {
+                setTaskBusy(task.id, state.operations.has(`task:${task.id}`));
+                return;
+            }
         }
         const orderList = element("datalist");
         orderList.id = "order-suggestions";
@@ -1127,6 +1258,11 @@
                     renderEditor(task, draft);
                 }),
             );
+        if (task.status === "rejected" && editable) {
+            const reopen = actionButton("提交复审", "primary", () => openReopen(task));
+            reopen.id = "reopen-button";
+            actions.append(reopen);
+        }
         setTaskBusy(task.id, state.operations.has(`task:${task.id}`));
     }
 
@@ -1382,7 +1518,7 @@
             const event = draft.events[Number(card.dataset.eventIndex)];
             const comparison = card.querySelector(".target-comparison");
             if (event && comparison)
-                renderTargetComparison(comparison, event, draft, task, task.status === "review_required");
+                renderTargetComparison(comparison, event, draft, task, isEditorEditable());
         }
     }
 
@@ -1420,7 +1556,7 @@
         if (editable) {
             const useVersion = actionButton(`带入当前版本 v${order.version}`, "secondary small", () => {
                 if (!container.isConnected || state.selectedId !== task.id || state.drafts.get(task.id) !== draft ||
-                    selectedTask()?.status !== "review_required" || state.operations.has(`task:${task.id}`)) return;
+                    !isEditorEditable() || state.operations.has(`task:${task.id}`)) return;
                 // Resolve at click time: neither a cached order nor a full editor
                 // redraw may overwrite the user's intervening review work.
                 const current = state.orders.find((entry) => entry.id === event.target_order_id);
@@ -1455,7 +1591,7 @@
             "input, select, button",
         ))
             node.disabled =
-                busy || selectedTask()?.status !== "review_required" || node.dataset.unavailable === "true";
+                busy || !isEditorEditable() || node.dataset.unavailable === "true";
         for (const node of byId("review-form").querySelectorAll(
             "input, button",
         ))
@@ -1469,6 +1605,200 @@
         byId("confirm-button").disabled =
             busy || (!!task && !!draft && draft.version !== task.version);
         byId("confirm-button").textContent = busy ? "正在提交…" : "核对并提交";
+        updateReviewActions();
+    }
+
+    function isEditorEditable() {
+        const task = selectedTask();
+        return !!task && canEditTask(task) && (task.status === "review_required" || (task.status === "rejected" && state.drafts.get(task.id)?.editing));
+    }
+
+    function updateReviewActions() {
+        const task = selectedTask();
+        const draft = task && state.drafts.get(task.id);
+        if (!task || !draft) return;
+        const busy = state.operations.has(`task:${task.id}`);
+        const conflict = draft.version !== task.version;
+        byId("confirm-button").hidden = task.status !== "review_required";
+        byId("reject-button").hidden = task.status !== "review_required";
+        byId("save-candidate-button").disabled = busy || !canEditTask(task) || (conflict && !draft.saveRequest?.uncertain) || !draft.dirty;
+        byId("save-candidate-button").textContent = busy ? "正在保存…" : "保存修正";
+        byId("cancel-edit-button").disabled = busy;
+        const reopen = byId("reopen-button");
+        if (reopen) {
+            const expired = task.sources?.some((source) => source.expired);
+            reopen.disabled = busy || conflict || draft.dirty || !task.candidate || expired;
+            reopen.title = draft.dirty ? "请先保存修正，再提交复审" : "恢复待审核，不重新识别或确认订单";
+            if (!task.candidate || expired) reopen.title = expired ? "原始证据已清理，无法提交复审" : ERROR_MESSAGES.CANDIDATE_REQUIRED;
+        }
+        const edit = byId("edit-rejected-button");
+        if (edit) edit.disabled = busy || !canEditTask(task);
+    }
+
+    function renderReviewHistory(task) {
+        const container = byId("task-review-history");
+        const key = JSON.stringify([task.id, task.review_history, task.candidate_revisions, task.model_candidate]);
+        if (state.lastHistoryKey === key) return;
+        state.lastHistoryKey = key;
+        container.replaceChildren();
+        const history = task.review_history || [];
+        const revisions = task.candidate_revisions || [];
+        container.hidden = !history.length && !revisions.length && !task.model_candidate;
+        if (container.hidden) return;
+        const details = element("details", "review-history");
+        details.open = task.status === "rejected";
+        details.append(element("summary", "", "驳回、修正与复审记录"));
+        const kinds = { rejected: "驳回", candidate_saved: "保存修正", review_reopened: "提交复审" };
+        const list = element("ol", "history-list");
+        for (const entry of history) {
+            const row = element("li", "history-event");
+            row.append(element("strong", "", `${kinds[entry.kind] || "审核操作"} · ${entry.task_version ? `v${entry.task_version}` : "旧记录 · 版本未记录"}`));
+            row.append(element("p", "", `${entry.actor || "未记录操作人"} · ${localDate(entry.created_at)}`));
+            row.append(element("p", "", `原因：${entry.reason || "未记录原因"}`));
+            row.append(element("p", "", entry.from_status && entry.to_status
+                ? `状态：${labelStatus(entry.from_status)} → ${labelStatus(entry.to_status)}`
+                : "旧记录 · 状态变化未记录"));
+            list.append(row);
+        }
+        details.append(list);
+        const appendCandidate = (label, candidate) => {
+            const snapshot = element("details", "candidate-snapshot");
+            snapshot.append(element("summary", "", label));
+            const values = (container, object, labels) => {
+                const fields = element("dl", "snapshot-fields");
+                for (const [key, title] of labels) fields.append(element("dt", "", title), element("dd", "", displayValue(object[key])));
+                container.append(fields);
+            };
+            appendWarnings(snapshot, candidate?.warnings, candidate?.missing_reasons);
+            for (const [index, event] of (candidate?.events || []).entries()) {
+                const section = element("section", "snapshot-event");
+                section.append(element("h4", "", `事件 ${index + 1} · ${actionLabel(event.action)}`));
+                values(section, event, [["customer", "客户"], ["external_id", "客户订单号"], ["currency", "币种"], ["occurred_at", "业务时间"], ["target_order_id", "目标订单 ID"], ["expected_order_version", "目标订单版本"], ["reason", "改单 / 撤单原因"]]);
+                for (const [itemIndex, item] of (event.items || []).entries()) {
+                    section.append(element("h5", "", `商品 ${itemIndex + 1}`));
+                    values(section, item, [["line_id", "明细 ID"], ["sku", "商品编码"], ["name", "商品名称"], ["quantity", "数量"], ["unit", "单位"], ["unit_price", "单价"]]);
+                }
+                appendWarnings(section, event.warnings, event.missing_reasons);
+                section.append(element("h5", "", "原始证据"));
+                if (!event.evidence?.length) section.append(element("p", "", "未记录证据片段，请核对原始截图。"));
+                for (const evidence of event.evidence || []) values(section, evidence, [["source_id", "证据来源 ID"], ["field", "对应字段"], ["text", "证据文本"]]);
+                snapshot.append(section);
+            }
+            details.append(snapshot);
+        };
+        for (const revision of revisions) appendCandidate(`修正版本 v${revision.version} · ${revision.actor} · ${localDate(revision.created_at)} · ${revision.reason}`, revision.candidate);
+        if (task.model_candidate) appendCandidate("原始模型候选（保留证据）", task.model_candidate);
+        container.append(details);
+    }
+
+    function cancelCandidateEdit() {
+        const task = selectedTask();
+        if (!task || state.operations.has(`task:${task.id}`)) return;
+        if (state.drafts.get(task.id)?.dirty && !window.confirm("取消编辑将丢弃这条任务尚未保存的修正。继续吗？")) return;
+        state.drafts.delete(task.id); state.lastRenderKey = null;
+        renderSelectedTask(task, true);
+        notice("已取消编辑，未保存修正。");
+    }
+
+    async function saveCandidate() {
+        const task = selectedTask();
+        if (!task || !isEditorEditable() || state.operations.has(`task:${task.id}`)) return;
+        const draft = draftFor(task);
+        if (draft.version !== task.version && !draft.saveRequest?.uncertain) { notice("任务已有新版本，请重新载入后核对。", "warning"); return; }
+        if (!draft.dirty) return;
+        if (!draft.actor.trim() || !draft.reason.trim()) { notice("请填写审核人和修订原因。", "warning"); return; }
+        const body = draft.saveRequest?.uncertain ? clone(draft.saveRequest.body) : { expected_version: draft.version, actor: draft.actor.trim(), reason: draft.reason.trim(), candidate: { ...clone(task.candidate || { schema_version: "1", warnings: [], missing_reasons: [] }), events: clone(draft.events) } };
+        const fingerprint = JSON.stringify(body);
+        if (!draft.saveRequest || draft.saveRequest.fingerprint !== fingerprint) draft.saveRequest = { fingerprint, key: uniqueKey(), body: clone(body), uncertain: false };
+        body.idempotency_key = draft.saveRequest.key;
+        const epoch = state.epoch;
+        state.operations.add(`task:${task.id}`); setTaskBusy(task.id, true);
+        try {
+            await request(`/api/tasks/${encodeURIComponent(task.id)}/candidate`, { method: "PUT", body });
+            if (epoch !== state.epoch) return;
+            const fetched = await request(`/api/tasks/${encodeURIComponent(task.id)}`);
+            if (epoch !== state.epoch) return;
+            const result = cacheTask(fetched);
+            state.tasks = state.tasks.map((item) => item.id === result.id ? { ...item, ...result } : item);
+            state.drafts.delete(task.id);
+            const saved = draftFor(result);
+            saved.editing = draft.editing; saved.actor = draft.actor; saved.reason = draft.reason;
+            state.lastRenderKey = null;
+            if (state.selectedId === task.id) renderSelectedTask(result, true);
+            renderQueue();
+            notice(result.status === "rejected" ? "修正已保存，任务仍为已驳回。请点击提交复审。"
+                : result.status === "review_required" ? "修正已保存，仍待人工审核，尚未生成正式订单。"
+                : "修正请求已完成，任务状态已变化，请核对当前结果。");
+        } catch (error) {
+            if (epoch !== state.epoch) return;
+            reportError(error);
+            if (["REQUEST_TIMEOUT", "NETWORK_ERROR"].includes(error.code)) {
+                draft.saveRequest.uncertain = true;
+                notice("保存结果未知，当前修正已保留。可再次点击保存修正，重试同一次请求；或重新载入候选核对结果。", "warning");
+            }
+            if (["VERSION_CONFLICT", "STATE_CONFLICT", "REQUEST_TIMEOUT", "NETWORK_ERROR"].includes(error.code)) await refresh();
+        } finally {
+            if (epoch !== state.epoch) return;
+            state.operations.delete(`task:${task.id}`); setTaskBusy(task.id, false);
+        }
+    }
+
+    function openReopen(task = selectedTask()) {
+        if (!task || task.status !== "rejected" || state.operations.has(`task:${task.id}`)) return;
+        const draft = draftFor(task);
+        if (draft.dirty) { notice("请先保存修正，再提交复审。", "warning"); return; }
+        if (draft.version !== task.version) { notice("任务已有新版本，请重新载入后核对。", "warning"); return; }
+        if (!task.candidate) { notice(ERROR_MESSAGES.CANDIDATE_REQUIRED, "warning"); return; }
+        state.reopenTarget = { id: task.id, version: task.version, request: null };
+        byId("reopen-form").reset();
+        byId("reopen-actor").value = draft.actor;
+        byId("reopen-reason").value = draft.reason;
+        byId("reopen-scope").textContent = `仅提交任务 #${shortId(task.id)} · v${task.version} 复审。`;
+        byId("reopen-error").hidden = true;
+        byId("reopen-submit").disabled = false; byId("reopen-cancel").disabled = false;
+        byId("reopen-actor").disabled = false; byId("reopen-reason").disabled = false;
+        openDialog("reopen-dialog", "reopen-actor");
+    }
+
+    async function reopenTask(event) {
+        event.preventDefault();
+        const target = state.reopenTarget;
+        if (!target || state.operations.has(`task:${target.id}`)) return;
+        const actor = byId("reopen-actor").value.trim();
+        const reason = byId("reopen-reason").value.trim();
+        if (!actor || !reason) return;
+        const task = state.taskCache.get(target.id);
+        const samePayload = target.request?.body.actor === actor && target.request?.body.reason === reason;
+        if ((!task || task.status !== "rejected" || task.version !== target.version) && !(target.request?.uncertain && samePayload)) { reportError(makeError("VERSION_CONFLICT"), byId("reopen-error")); return; }
+        const body = target.request?.uncertain && samePayload ? clone(target.request.body) : { expected_version: target.version, actor, reason };
+        const fingerprint = JSON.stringify(body);
+        if (!target.request || target.request.fingerprint !== fingerprint) target.request = { fingerprint, key: uniqueKey(), body: clone(body), uncertain: false };
+        body.idempotency_key = target.request.key;
+        const epoch = state.epoch;
+        state.operations.add(`task:${target.id}`); setTaskBusy(target.id, true);
+        byId("reopen-submit").disabled = true; byId("reopen-cancel").disabled = true;
+        byId("reopen-actor").disabled = true; byId("reopen-reason").disabled = true;
+        try {
+            await request(`/api/tasks/${encodeURIComponent(target.id)}/reopen`, { method: "POST", body });
+            if (epoch !== state.epoch) return;
+            state.drafts.delete(target.id); state.lastRenderKey = null;
+            closeDialog("reopen-dialog"); state.reopenTarget = null;
+            notice("已提交复审，恢复待审核。请继续核对后确认；未重新识别，未生成正式订单。");
+            await refresh();
+        } catch (error) {
+            if (epoch !== state.epoch) return;
+            reportError(error, byId("reopen-error"));
+            if (["REQUEST_TIMEOUT", "NETWORK_ERROR"].includes(error.code)) {
+                target.request.uncertain = true;
+                byId("reopen-error").textContent = "复审结果未知。再次确认会重试同一次请求；也可取消后核对任务当前状态。";
+            }
+            if (["VERSION_CONFLICT", "STATE_CONFLICT", "REQUEST_TIMEOUT", "NETWORK_ERROR"].includes(error.code)) await refresh();
+        } finally {
+            if (epoch !== state.epoch) return;
+            state.operations.delete(`task:${target.id}`); setTaskBusy(target.id, false);
+            byId("reopen-submit").disabled = false; byId("reopen-cancel").disabled = false;
+            byId("reopen-actor").disabled = false; byId("reopen-reason").disabled = false;
+        }
     }
 
     function validateDraft(draft) {
@@ -2292,6 +2622,8 @@
     byId("logout-button").addEventListener("click", manualLogout);
     byId("logout-mobile").addEventListener("click", manualLogout);
     byId("refresh-button").addEventListener("click", () => {
+        state.queryGeneration += 1;
+        clearQueueSelection();
         if (state.view === "settings") { void loadConfig(true); void loadModelSettings(true); }
         void refresh();
         const task = selectedTask();
@@ -2299,8 +2631,17 @@
     });
     byId("notice-close").addEventListener("click", () => { byId("notice").hidden = true; });
     byId("queue-filter").addEventListener("change", queryChanged);
+    byId("queue-edit-selected").addEventListener("click", () => {
+        if (state.selectionGeneration !== state.queryGeneration) return;
+        const tasks = selectionTasks();
+        if (!tasks.length) return;
+        state.editingIds = tasks.map((task) => task.id);
+        editTask(tasks[0].id, true);
+    });
+    byId("queue-clear-selection").addEventListener("click", clearQueueSelection);
     byId("queue-search").addEventListener("input", () => {
         state.queryGeneration += 1;
+        clearQueueSelection();
         clearTimeout(state.searchTimer);
         state.searchTimer = setTimeout(queryChanged, 250);
     });
@@ -2326,6 +2667,10 @@
     byId("zoom-out").addEventListener("click", () => { state.zoom = Math.max(50, state.zoom - 25); applyZoom(); });
     byId("zoom-fit").addEventListener("click", () => { state.zoom = 100; applyZoom(); });
     byId("review-form").addEventListener("submit", (event) => { event.preventDefault(); openConfirm(); });
+    byId("save-candidate-button").addEventListener("click", saveCandidate);
+    byId("cancel-edit-button").addEventListener("click", cancelCandidateEdit);
+    byId("reopen-form").addEventListener("submit", reopenTask);
+    byId("reopen-cancel").addEventListener("click", () => closeDialog("reopen-dialog"));
     byId("confirm-submit").addEventListener("click", () => confirmTask());
     byId("confirm-cancel").addEventListener("click", () => closeDialog("confirm-dialog"));
     for (const [id, field] of [["review-actor", "actor"], ["review-reason", "reason"]]) byId(id).addEventListener("input", () => {
@@ -2336,7 +2681,9 @@
         const task = selectedTask();
         if (!task || state.operations.has(`task:${task.id}`)) return;
         if (state.drafts.get(task.id)?.dirty && !window.confirm("重新载入会清除这条任务尚未提交的修改。继续吗？")) return;
+        const editing = state.drafts.get(task.id)?.editing;
         state.drafts.delete(task.id); state.lastRenderKey = null;
+        draftFor(task).editing = !!editing;
         renderSelectedTask(task, true);
     });
     byId("reject-button").addEventListener("click", () => openReject());
@@ -2361,7 +2708,7 @@
     });
     for (const dialog of document.querySelectorAll("dialog")) {
         dialog.addEventListener("cancel", (event) => {
-            const taskId = dialog.id === "reject-dialog" ? state.rejectTarget?.id : dialog.id === "duplicate-dialog" ? state.duplicate?.taskId : state.confirmTarget?.taskId;
+            const taskId = dialog.id === "reopen-dialog" ? state.reopenTarget?.id : dialog.id === "reject-dialog" ? state.rejectTarget?.id : dialog.id === "duplicate-dialog" ? state.duplicate?.taskId : state.confirmTarget?.taskId;
             if ((dialog.id === "model-test-dialog" && modelBusy()) || (dialog.id === "upload-dialog" && state.operations.has("upload")) || (taskId && state.operations.has(`task:${taskId}`))) event.preventDefault();
         });
         dialog.addEventListener("close", () => {
@@ -2371,6 +2718,7 @@
             state.dialogFocus.delete(dialog.id);
             if (dialog.id === "confirm-dialog") state.confirmTarget = null;
             if (dialog.id === "reject-dialog") state.rejectTarget = null;
+            if (dialog.id === "reopen-dialog") state.reopenTarget = null;
             if (dialog.id === "duplicate-dialog") state.duplicate = null;
             if (dialog.id === "order-history-dialog") state.historyGeneration += 1;
             if (target?.isConnected && !target.disabled && !document.querySelector("dialog[open]") && state.token) target.focus();
