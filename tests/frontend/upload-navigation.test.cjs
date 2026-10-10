@@ -428,3 +428,216 @@ test("an in-flight dialog with every control disabled retains focus on the dialo
     await flush();
     assert.equal(dialog.open, false);
 });
+
+function configureModel(app) {
+    app.fill(app.id("model-provider"), "openai-compatible");
+    app.fill(app.id("model-name"), "synthetic-vision-model");
+    app.fill(app.id("model-base-url"), "https://models.example.com/v1");
+    app.fill(app.id("model-key-action"), "replace");
+    app.fill(app.id("model-api-key"), "synthetic-test-only-api-key");
+    app.id("model-allow-external").checked = true;
+    app.dispatch(app.id("model-allow-external"), "change");
+}
+
+async function settings(app) { await app.login(); await app.click("nav-settings"); }
+const puts = (app) => app.calls("/api/model-settings").filter((call) => call.method === "PUT");
+
+test("model settings save writes the key once and never tests or persists browser secrets", async (t) => {
+    const app = setup(t);
+    await settings(app);
+    assert.match(app.id("model-settings-state").textContent, /Demo/);
+    configureModel(app);
+    await app.submit("model-settings-form");
+    assert.equal(puts(app).length, 1);
+    assert.deepEqual(JSON.parse(puts(app)[0].options.body), {
+        expected_revision: 0, provider: "openai-compatible", model: "synthetic-vision-model",
+        base_url: "https://models.example.com/v1", allow_external: true,
+        api_key_action: "replace", api_key: "synthetic-test-only-api-key",
+        timeout_seconds: 15, total_timeout_seconds: 45, max_output_tokens: 4096, max_requests: 100,
+    });
+    assert.equal(app.id("model-api-key").type, "password");
+    assert.equal(app.id("model-api-key").value, "");
+    assert.equal(app.calls("/api/model-settings/test").length, 0);
+    assert.match(app.id("model-settings-state").textContent, /已配置.*未验证/);
+    assert.doesNotMatch(app.document.body.textContent, /synthetic-test-only-api-key/);
+    assert.equal(app.window.localStorage.length, 0);
+    assert.equal(app.window.sessionStorage.length, 1); // Only the local access token.
+    assert.equal(JSON.stringify(app.server.modelSettings).includes("synthetic-test-only-api-key"), false);
+});
+
+test("MiniMax fixes the China endpoint and model and explains text versus OCR capability", async (t) => {
+    const app = setup(t); await settings(app);
+    app.fill(app.id("model-provider"), "minimax-cn");
+    assert.equal(app.id("model-base-url").value, "https://api.minimax.cn/v1");
+    assert.equal(app.id("model-name").value, "MiniMax-M3");
+    assert.equal(app.id("model-base-url").disabled, true);
+    assert.equal(app.id("model-name").disabled, true);
+    assert.match(app.id("model-capability-warning").textContent, /文本模型.*不等于.*OCR/);
+});
+
+test("blank keep, explicit replace, and explicit delete have different payloads", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    await app.submit("model-settings-form");
+    await app.submit("model-settings-form");
+    assert.equal(JSON.parse(puts(app)[1].options.body).api_key_action, "keep");
+    assert.equal(Object.hasOwn(JSON.parse(puts(app)[1].options.body), "api_key"), false);
+    app.fill(app.id("model-key-action"), "delete");
+    await app.submit("model-settings-form");
+    assert.equal(JSON.parse(puts(app)[2].options.body).api_key_action, "delete");
+    assert.match(app.id("model-settings-state").textContent, /尚未配置完整/);
+    assert.equal(app.id("model-test").disabled, true);
+});
+
+test("changing a saved endpoint or provider forbids keeping its credential", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    await app.submit("model-settings-form");
+    app.fill(app.id("model-base-url"), "https://other.example.com/v1");
+    assert.equal(app.id("model-key-action").value, "replace");
+    assert.equal(app.id("model-key-action").querySelector('[value="keep"]').disabled, true);
+    assert.match(app.id("model-key-status").textContent, /不能复用/);
+    await app.submit("model-settings-form");
+    assert.equal(puts(app).length, 1, "A fresh credential is required before save");
+    app.fill(app.id("model-provider"), "minimax-cn");
+    assert.equal(app.id("model-key-action").value, "replace");
+    assert.equal(app.id("model-api-key").value, "");
+});
+
+test("failed save retains field and password only in the form and focuses safe error", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    app.on("/api/model-settings", () => json({ error: { code: "MODEL_SETTINGS_CONFLICT", message: "synthetic-do-not-display" } }, 409), { method: "PUT" });
+    await app.submit("model-settings-form");
+    assert.equal(app.id("model-api-key").value, "synthetic-test-only-api-key");
+    assert.equal(app.id("model-name").value, "synthetic-vision-model");
+    assert.equal(app.document.activeElement, app.id("model-settings-error"));
+    assert.match(app.id("model-settings-error").textContent, /重新读取/);
+    assert.doesNotMatch(app.document.body.textContent, /synthetic-do-not-display/);
+    assert.equal(app.window.localStorage.length, 0);
+    await app.click("logout-button");
+    assert.equal(app.id("model-api-key").value, "");
+    assert.equal(app.id("model-name").value, "");
+});
+
+test("dirty settings guard navigation and unload; cancelled departure retains password", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    app.window.confirm = () => false;
+    await app.click("nav-dashboard");
+    assert.equal(app.id("settings-view").hidden, false);
+    assert.equal(app.id("model-api-key").value, "synthetic-test-only-api-key");
+    const unload = new app.window.Event("beforeunload", { cancelable: true });
+    app.window.dispatchEvent(unload); assert.equal(unload.defaultPrevented, true);
+    app.window.confirm = () => true;
+    await app.click("nav-dashboard");
+    assert.equal(app.id("settings-view").hidden, true);
+    assert.equal(app.id("model-api-key").value, "");
+    await app.click("nav-settings");
+    assert.equal(app.id("model-provider").value, "demo");
+});
+
+test("failed settings refresh does not discard edits and repeated navigation does not reload them", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    await app.click("nav-settings");
+    assert.equal(app.id("model-api-key").value, "synthetic-test-only-api-key");
+    app.on("/api/model-settings", () => { throw new Error("offline"); }, { method: "GET" });
+    await app.click("model-reset");
+    assert.equal(app.id("model-api-key").value, "synthetic-test-only-api-key");
+    assert.equal(app.id("model-provider").value, "openai-compatible");
+    assert.equal(app.id("model-save").disabled, false);
+});
+
+test("test requires saved enabled configuration and separate destination and cost confirmation", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    assert.equal(app.id("model-test").disabled, true);
+    await app.submit("model-settings-form");
+    app.id("model-test").focus();
+    await app.click("model-test");
+    assert.equal(app.id("model-test-dialog").open, true);
+    assert.equal(app.document.activeElement, app.id("model-test-cancel"));
+    assert.match(app.id("model-test-dialog").textContent, /models.example.com/);
+    assert.match(app.id("model-test-dialog").textContent, /虚构测试内容/);
+    assert.match(app.id("model-test-dialog").textContent, /费用/);
+    assert.equal(app.calls("/api/model-settings/test").length, 0);
+    await app.click("model-test-cancel");
+    assert.equal(app.document.activeElement, app.id("model-test"));
+    assert.equal(app.calls("/api/model-settings/test").length, 0);
+    await app.click("model-test"); await app.click("model-test-confirm");
+    assert.equal(app.calls("/api/model-settings/test").length, 1);
+    assert.deepEqual(JSON.parse(app.calls("/api/model-settings/test")[0].options.body), { expected_revision: 1, confirm_external: true });
+    assert.match(app.id("model-settings-result").textContent, /测试成功/);
+    app.id("model-allow-external").checked = false; app.dispatch(app.id("model-allow-external"), "change");
+    await app.submit("model-settings-form");
+    assert.equal(app.id("model-test").disabled, true);
+    assert.doesNotMatch(app.id("model-settings-result").textContent, /测试成功/);
+});
+
+test("save and test are single-flight, cannot navigate mid-request, and late logout results are ignored", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    const pending = deferred();
+    app.on("/api/model-settings", () => pending.promise, { method: "PUT" });
+    await app.submit("model-settings-form"); await app.submit("model-settings-form");
+    assert.equal(puts(app).length, 1);
+    await app.click("nav-dashboard"); assert.equal(app.id("settings-view").hidden, false);
+    await app.click("logout-button");
+    pending.resolve(json({ ...app.server.modelSettings, provider: "openai-compatible", status: "configured" }));
+    await flush();
+    assert.equal(app.id("workspace").hidden, true);
+    assert.equal(app.id("model-api-key").value, "");
+    assert.equal(app.id("model-name").value, "");
+});
+
+test("external upload cancel sends nothing and acceptance binds destination consent to revision", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app); await app.submit("model-settings-form");
+    await app.click("open-upload"); app.files();
+    const prompts = []; app.window.confirm = (message) => { prompts.push(message); return false; };
+    await app.submit("upload-form");
+    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.match(prompts[0], /models.example.com.*synthetic-vision-model/);
+    assert.match(prompts[0], /1 张完整截图/);
+    app.window.confirm = () => true; await app.submit("upload-form");
+    const body = app.calls("/api/uploads")[0].options.body;
+    assert.equal(body.get("config_revision"), "1");
+    assert.equal(body.get("confirm_external"), "true");
+});
+
+test("missing encryption key leaves settings editable and requires replace or delete recovery", async (t) => {
+    const app = setup(t);
+    app.server.modelSettings = { revision: 4, provider: "openai-compatible", model: "synthetic-model", base_url: "https://models.example.com/v1", api_key_configured: true, credential_status: "unavailable", allow_external: true, status: "not_configured", test_status: "not_tested" };
+    await settings(app);
+    assert.equal(app.id("model-provider").disabled, false);
+    assert.match(app.id("model-key-status").textContent, /无法解密/);
+    assert.equal(app.id("model-key-action").value, "replace");
+    assert.equal(app.id("model-key-action").querySelector('[value="keep"]').disabled, true);
+    assert.equal(app.id("model-test").disabled, true);
+    app.fill(app.id("model-key-action"), "delete");
+    await app.submit("model-settings-form");
+    assert.equal(JSON.parse(puts(app)[0].options.body).api_key_action, "delete");
+});
+
+test("explicit test failure is not success, retries stay user initiated and single-flight", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app); await app.submit("model-settings-form");
+    app.on("/api/model-settings/test", () => json({ ...app.server.modelSettings, test_status: "failed" }));
+    await app.click("model-test"); await app.click("model-test-confirm");
+    assert.match(app.id("model-settings-result").textContent, /测试失败/);
+    assert.doesNotMatch(app.id("model-settings-result").textContent, /测试成功/);
+    assert.equal(app.calls("/api/model-settings/test").length, 1);
+    const pending = deferred(); app.on("/api/model-settings/test", () => pending.promise);
+    await app.click("model-test"); await app.click("model-test-confirm"); await app.click("model-test-confirm");
+    assert.equal(app.calls("/api/model-settings/test").length, 2);
+    assert.equal(app.id("model-test-cancel").disabled, true);
+    const cancel = new app.window.Event("cancel", { cancelable: true }); app.id("model-test-dialog").dispatchEvent(cancel);
+    assert.equal(cancel.defaultPrevented, true);
+    pending.resolve(json({ error: { code: "MODEL_SETTINGS_CONFLICT" } }, 409)); await flush();
+    assert.equal(app.document.activeElement, app.id("model-test-error"));
+    assert.equal(app.id("model-test-confirm").disabled, false);
+    assert.equal(app.id("model-test-dialog").open, true);
+});
+
+test("advanced limits are editable, transmitted as integers and retained after save", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    app.fill(app.id("model-timeout"), "30"); app.fill(app.id("model-total-timeout"), "90");
+    app.fill(app.id("model-max-tokens"), "2048"); app.fill(app.id("model-max-requests"), "20");
+    await app.submit("model-settings-form");
+    const body = JSON.parse(puts(app)[0].options.body);
+    assert.equal(body.timeout_seconds, 30); assert.equal(body.total_timeout_seconds, 90);
+    assert.equal(body.max_output_tokens, 2048); assert.equal(body.max_requests, 20);
+    assert.equal(app.id("model-timeout").value, "30"); assert.equal(app.id("model-max-requests").value, "20");
+});

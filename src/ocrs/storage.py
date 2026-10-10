@@ -9,7 +9,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE sources(id TEXT PRIMARY KEY, digest TEXT NOT NULL, source_label TEXT NOT NULL,
  filename TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -72,6 +72,13 @@ def migrate(root: Path) -> None:
             raise RuntimeError("DATABASE_VERSION_NEWER")
         if version == 0:
             connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + "PRAGMA user_version=1;COMMIT;")
+        if version < 2:
+            connection.executescript(
+                "BEGIN IMMEDIATE;"
+                "ALTER TABLE tasks ADD COLUMN model_revision INTEGER NOT NULL DEFAULT -1;"
+                "ALTER TABLE tasks ADD COLUMN external_authorized INTEGER NOT NULL DEFAULT 0;"
+                "PRAGMA user_version=2;COMMIT;"
+            )
         connection.execute("PRAGMA journal_mode=WAL")
     for name in ("images", "exports"):
         (root / name).mkdir(mode=0o700, exist_ok=True)

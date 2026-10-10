@@ -2546,3 +2546,15 @@ main#main-content {
     line-height: 1.8;
     overflow-wrap: anywhere;
 }
+
+.model-settings-panel { margin-bottom: 20px; }
+.model-settings-panel fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+.model-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.model-settings-grid label, .model-settings-grid input { min-width: 0; }
+.model-wide { grid-column: 1 / -1; }
+.model-settings-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.model-warning { background: var(--amber-soft); color: var(--amber); padding: 12px; border-radius: var(--radius); }
+@media (max-width: 600px) { .model-settings-grid { grid-template-columns: minmax(0, 1fr); } .model-settings-actions .button { width: 100%; } }
+
+.model-limits { margin: 16px 0; }
+.model-limits summary { cursor: pointer; margin-bottom: 12px; }

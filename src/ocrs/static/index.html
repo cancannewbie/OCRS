@@ -833,13 +833,45 @@
                                     运行配置
                                 </h1>
                                 <p>
-                                    只读查看当前配置与能力边界。配置存在不代表连通性或识别效果已验证。
+                                    在页面填写模型配置并保存到本机。保存不发起外部调用，测试需单独确认。
                                 </p>
                             </div>
                             <span class="badge neutral">
-                                只读
+                                本机配置
                             </span>
                         </div>
+                        <section class="panel model-settings-panel" aria-labelledby="model-settings-title">
+                            <div class="panel-heading"><h2 id="model-settings-title">模型设置</h2><span id="model-settings-state" class="badge neutral" role="status">正在读取</span></div>
+                            <p id="model-settings-description" class="muted">密钥仅写入后端，不会回显。此页面不保存浏览器草稿；退出会清除未保存输入。</p>
+                            <form id="model-settings-form" autocomplete="off" aria-describedby="model-settings-description">
+                                <fieldset id="model-settings-fields" disabled>
+                                    <legend class="sr-only">编辑模型连接</legend>
+                                    <div class="model-settings-grid">
+                                        <label for="model-provider">模型供应商<select id="model-provider"><option value="demo">Demo · 虚构流程演示</option><option value="minimax-cn">MiniMax 中国站</option><option value="openai-compatible">OpenAI 兼容接口</option></select></label>
+                                        <label for="model-name">模型名称<input id="model-name" maxlength="160" spellcheck="false" /></label>
+                                        <label for="model-base-url" class="model-wide">API 基础地址<input id="model-base-url" type="url" maxlength="2048" spellcheck="false" placeholder="https://api.example.com/v1" aria-describedby="model-capability-warning" /></label>
+                                        <label for="model-key-action">密钥操作<select id="model-key-action"><option value="keep">保留已保存密钥（输入留空）</option><option value="replace">替换为新密钥</option><option value="delete">删除已保存密钥</option></select></label>
+                                        <label for="model-api-key">新 API 密钥<input id="model-api-key" type="password" autocomplete="new-password" maxlength="4096" spellcheck="false" aria-describedby="model-key-status" disabled /></label>
+                                    </div>
+                                    <p id="model-key-status" class="muted"></p>
+                                    <p id="model-capability-warning" class="model-warning">Demo 不执行 OCR，只返回虚构候选。</p>
+                                    <label class="checkbox-label"><input id="model-allow-external" type="checkbox" />允许向以上模型服务发起外部调用</label>
+                                    <details class="model-limits"><summary>请求超时与预算上限</summary>
+                                        <div class="model-settings-grid">
+                                            <label for="model-timeout">单次超时（秒）<input id="model-timeout" type="number" min="1" max="60" step="1" required value="15" /></label>
+                                            <label for="model-total-timeout">总超时（秒）<input id="model-total-timeout" type="number" min="1" max="180" step="1" required value="45" /></label>
+                                            <label for="model-max-tokens">最大输出 tokens<input id="model-max-tokens" type="number" min="1" max="8192" step="1" required value="4096" /></label>
+                                            <label for="model-max-requests">请求次数上限<input id="model-max-requests" type="number" min="1" max="100000" step="1" required value="100" /></label>
+                                        </div>
+                                        <p class="muted">总超时应不少于单次超时。请求上限不是金额预算；实际费用取决于供应商定价和输入量。</p>
+                                    </details>
+                                    <p class="muted">开启开关本身不发送资料。真实截图仍需在每次导入时确认外传范围；测试仅发送系统生成的虚构内容，可能产生费用。</p>
+                                </fieldset>
+                                <p id="model-settings-error" class="form-error" role="alert" tabindex="-1" hidden></p>
+                                <p id="model-settings-result" role="status" class="muted"></p>
+                                <div class="model-settings-actions"><button id="model-save" class="button primary" type="submit" disabled>保存配置</button><button id="model-reset" class="button secondary" type="button" disabled>放弃修改 / 重新读取</button><button id="model-test" class="button secondary" type="button" disabled>测试已保存配置</button></div>
+                            </form>
+                        </section>
                         <div id="settings-config" class="settings-config">
                             <div class="panel config-loading">
                                 正在读取安全配置摘要…
@@ -1070,6 +1102,13 @@
                     关闭
                 </button>
             </div>
+        </dialog>
+        <dialog id="model-test-dialog" class="modal" aria-labelledby="model-test-title">
+            <h2 id="model-test-title">确认发送虚构测试内容？</h2>
+            <p id="model-test-destination" class="config-note"></p>
+            <p>仅发送系统生成的虚构测试内容，不读取截图、订单或客户资料。调用可能产生供应商费用。测试通过只说明此次请求通过，不代表 OCR 准确率或所有图片均受支持。</p>
+            <p id="model-test-error" class="form-error" role="alert" tabindex="-1" hidden></p>
+            <div class="modal-actions"><button id="model-test-cancel" class="button secondary" type="button">取消</button><button id="model-test-confirm" class="button primary" type="button">同意发送并测试</button></div>
         </dialog>
         <noscript>
             订单审核工作台需要启用 JavaScript。

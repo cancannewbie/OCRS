@@ -115,6 +115,7 @@ function setup(t, options = {}) {
             deployment_mode: "single-user-local",
             backup_mode: "offline-cli",
         },
+        modelSettings: { revision: 0, provider: "demo", model: "", base_url: "", api_key_configured: false, allow_external: false, status: "demo", test_status: "not_tested" },
         status: {
             provider: "demo",
             inbox_enabled: true,
@@ -189,6 +190,18 @@ function setup(t, options = {}) {
             return task ? json(copy(task)) : json({ error: { code: "TASK_NOT_FOUND" } }, 404);
         }
         if (entry.path === "/api/orders") return json({ orders: copy(server.orders) });
+        if (entry.path === "/api/model-settings") {
+            if (entry.method === "PUT") {
+                const body = JSON.parse(fetchOptions.body);
+                const key = body.api_key_action === "replace" || (body.api_key_action === "keep" && server.modelSettings.api_key_configured);
+                server.modelSettings = { revision: server.modelSettings.revision + 1, provider: body.provider, model: body.model, base_url: body.base_url, api_key_configured: key, allow_external: body.allow_external, status: body.provider === "demo" ? "demo" : key ? "configured" : "not_configured", test_status: "not_tested", timeout_seconds: body.timeout_seconds, total_timeout_seconds: body.total_timeout_seconds, max_output_tokens: body.max_output_tokens, max_requests: body.max_requests };
+            }
+            return json(copy(server.modelSettings));
+        }
+        if (entry.path === "/api/model-settings/test") {
+            server.modelSettings.test_status = "passed";
+            return json(copy(server.modelSettings));
+        }
         if (entry.path === "/api/config") return json(copy(server.config));
         if (/^\/api\/sources\//.test(entry.path)) return image();
         if (/^\/api\/orders\/[^/]+\/history$/.test(entry.path))

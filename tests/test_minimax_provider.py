@@ -440,18 +440,13 @@ def minimax_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.usefixtures("minimax_env")
-def test_minimax_env_defaults_use_cn_endpoint_and_explicitly_chosen_model() -> None:
+def test_legacy_minimax_env_does_not_override_page_settings() -> None:
     settings = Settings.from_env()
-    assert settings.provider == "minimax-cn"
-    assert settings.model_url == CN_URL
-    assert settings.model == "MiniMax-M3"
-    assert settings.allow_external is True
-    assert settings.model_timeout_seconds == 60
-    assert settings.model_total_timeout_seconds == 120
-    assert settings.model_max_output_tokens == 4096
-    assert settings.max_requests == 100
+    assert settings.provider == "demo"
+    assert settings.model == ""
+    assert settings.api_key == ""
+    assert settings.allow_external is False
     assert FAKE_KEY not in repr(settings)
-    assert isinstance(Service(settings).provider, MiniMaxCNProvider)
 
 
 @pytest.mark.usefixtures("minimax_env")
@@ -468,17 +463,15 @@ def test_other_providers_keep_original_endpoint_and_timeout_defaults(
 
 @pytest.mark.usefixtures("minimax_env")
 @pytest.mark.parametrize("missing", ["OCRS_API_KEY", "OCRS_MODEL", "OCRS_ALLOW_EXTERNAL"])
-def test_minimax_cannot_start_without_explicit_key_model_and_external_permission(
+def test_missing_legacy_model_variables_does_not_block_local_login(
     missing: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv(missing)
-    with pytest.raises(ValueError, match="真实模型需要") as error:
-        Settings.from_env()
-    assert FAKE_KEY not in str(error.value)
+    assert Settings.from_env().provider == "demo"
 
 
 @pytest.mark.usefixtures("minimax_env")
-def test_minimax_env_supports_bounded_limit_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_model_limit_overrides_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in {
         "OCRS_MODEL_TIMEOUT_SECONDS": "20",
         "OCRS_MODEL_TOTAL_TIMEOUT_SECONDS": "40",
@@ -487,10 +480,10 @@ def test_minimax_env_supports_bounded_limit_overrides(monkeypatch: pytest.Monkey
     }.items():
         monkeypatch.setenv(name, value)
     settings = Settings.from_env()
-    assert settings.model_timeout_seconds == 20
-    assert settings.model_total_timeout_seconds == 40
-    assert settings.model_max_output_tokens == 1024
-    assert settings.max_requests == 2
+    assert settings.model_timeout_seconds == 15
+    assert settings.model_total_timeout_seconds == 45
+    assert settings.model_max_output_tokens == 4096
+    assert settings.max_requests == 100
 
 
 @pytest.mark.usefixtures("minimax_env")
@@ -512,11 +505,10 @@ def test_minimax_env_supports_bounded_limit_overrides(monkeypatch: pytest.Monkey
         ("OCRS_MAX_REQUESTS", "fictional-invalid-value"),
     ],
 )
-def test_minimax_env_rejects_invalid_limits_without_echoing_values(
+def test_legacy_invalid_limits_do_not_prevent_page_configuration(
     name: str, value: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(name, value)
-    with pytest.raises(ValueError, match=name) as error:
-        Settings.from_env()
-    assert "fictional-invalid-value" not in str(error.value)
-    assert FAKE_KEY not in str(error.value)
+    settings = Settings.from_env()
+    assert settings.provider == "demo"
+    assert FAKE_KEY not in repr(settings)
