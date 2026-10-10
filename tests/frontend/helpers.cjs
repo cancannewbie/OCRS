@@ -185,6 +185,20 @@ function setup(t, options = {}) {
                 .some((value) => String(value || "").toLowerCase().includes(query)));
             return json({ tasks: copy(filtered.slice(offset, offset + limit)), total: filtered.length, limit, offset, has_more: offset + limit < filtered.length });
         }
+
+        if (entry.path === "/api/recognitions" && entry.method === "POST")
+            return json({ schema_version: "1", task_id: server.tasks[0]?.id || "task-1", status: "received", verified: false, duplicate: false }, 202);
+        const recognition = entry.path.match(/^\/api\/recognitions\/([^/]+)(\/result)?$/);
+        if (recognition) {
+            const task = server.tasks.find((item) => item.id === decodeURIComponent(recognition[1]));
+            if (!task) return json({ error: { code: "TASK_NOT_FOUND" } }, 404);
+            const status = ["received", "recognizing", "failed"].includes(task.status) ? task.status : "succeeded";
+            if (recognition[2]) {
+                if (status !== "succeeded") return json({ error: { code: status === "failed" ? "RECOGNITION_FAILED" : "RESULT_NOT_READY" } }, 409);
+                return json({ schema_version: "1", task_id: task.id, status, verified: false, recognition_mode: task.provider === "demo" ? "demo" : "external", review_status: task.status, result: copy(task.model_candidate || task.candidate) });
+            }
+            return json({ schema_version: "1", task_id: task.id, status, version: task.version, provider: task.provider, model_revision: task.model_revision ?? 0, verified: false, review_status: task.status, duplicate: false, result_url: "/api/recognitions/" + task.id + "/result", error_code: task.error_code ?? null });
+        }
         if (/^\/api\/tasks\/[^/]+$/.test(entry.path)) {
             const task = server.tasks.find((item) => item.id === decodeURIComponent(entry.path.split("/").at(-1)));
             return task ? json(copy(task)) : json({ error: { code: "TASK_NOT_FOUND" } }, 404);

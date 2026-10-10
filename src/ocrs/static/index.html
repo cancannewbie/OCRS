@@ -6,7 +6,7 @@
         <meta name="color-scheme" content="light" />
         <meta name="referrer" content="no-referrer" />
         <title>
-            OCRS · 订单审核工作台
+            OCRS · 截图信息识别
         </title>
         <link rel="stylesheet" href="/style.css" />
         <script src="/app.js" defer>
@@ -25,25 +25,23 @@
                     <span>
                         OCRS
                         <span class="brand-subtitle">
-                            订单审核系统
+                            截图信息识别
                         </span>
                     </span>
                 </div>
                 <div class="login-story">
                     <span class="eyebrow">
-                        ORDER COLLECTION
-                        &
-                        REVIEW
+                        SCREENSHOT RECOGNITION
                     </span>
                     <h1>
-                        每一笔订单，
+                        每一张截图，
                         <br />
-                        有据可查。
+                        提取有据。
                     </h1>
                     <p>
-                        让截图有出处，让修改有记录。
+                        接收图片，提取信息，返回结构化结果。
                         <br />
-                        从原始证据到正式订单，由你完成最后确认。
+                        通过页面上传或 API 接入，结果始终保留原始证据。
                     </p>
                     <ol class="login-workflow">
                         <li>
@@ -52,7 +50,7 @@
                             </span>
                             <div>
                                 <strong>
-                                    导入截图
+                                    上传识别
                                 </strong>
                                 <small>
                                     手动上传已获授权的图片
@@ -65,10 +63,10 @@
                             </span>
                             <div>
                                 <strong>
-                                    逐项审核
+                                    模型提取
                                 </strong>
                                 <small>
-                                    对照原图，核实模型候选
+                                    保留不确定字段、证据与原因
                                 </small>
                             </div>
                         </li>
@@ -78,10 +76,10 @@
                             </span>
                             <div>
                                 <strong>
-                                    确认与导出
+                                    获取结果
                                 </strong>
                                 <small>
-                                    保留版本、变更原因和业务事件
+                                    无需先审核；结果未经人工核实
                                 </small>
                             </div>
                         </li>
@@ -105,7 +103,7 @@
                         安全访问
                     </span>
                     <h2>
-                        进入订单工作台
+                        进入识别工作台
                     </h2>
                     <p class="muted">
                         运行 ocrs token，输入本机访问令牌。
@@ -140,7 +138,7 @@
                         </p>
                     </div>
                     <p class="login-privacy">
-                        截图与订单 API 受令牌保护。请仅在可信本机使用。
+                        图片与识别 API 受令牌保护。请仅在可信本机使用。
                     </p>
                 </form>
             </main>
@@ -154,7 +152,7 @@
                     <span>
                         OCRS
                         <span class="brand-subtitle">
-                            订单审核系统
+                            截图信息识别
                         </span>
                     </span>
                 </a>
@@ -164,8 +162,11 @@
                 <nav class="nav-tabs" aria-label="主导航">
                     <button id="nav-dashboard" class="nav-tab active" type="button" aria-current="page">
                         <span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path class="icon-fill" d="M3 3h14v14H3z" fill="currentColor" stroke="none" /><path d="M3 3h5v5H3z M12 3h5v5h-5z M3 12h5v5H3z M12 12h5v5h-5z" vector-effect="non-scaling-stroke" /></svg></span>
-                        工作台
+                        上传识别
                     </button>
+                    <button id="nav-results" class="nav-tab" type="button"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path class="icon-fill" d="M3 3h14v14H3z" fill="currentColor" stroke="none" /><path d="M3 3h14v14H3z M6 7h8 M6 10h8 M6 13h5" vector-effect="non-scaling-stroke" /></svg></span>识别结果</button>
+                    <button id="nav-api" class="nav-tab" type="button"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path class="icon-fill" d="M3 3h14v14H3z" fill="currentColor" stroke="none" /><path d="M3 3h14v14H3z M6 7h8 M6 10h8 M6 13h5" vector-effect="non-scaling-stroke" /></svg></span>API 接入</button>
+                    <span class="nav-section-label">可选下游</span>
                     <button id="nav-review" class="nav-tab" type="button">
                         <span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path class="icon-fill" d="M3 3h14v14H3z" fill="currentColor" stroke="none" /><path d="M3 3h14v14H3z M6 7h8 M6 10h8 M6 13h5" vector-effect="non-scaling-stroke" /></svg></span>
                         审核队列
@@ -193,9 +194,9 @@
                         本机工作空间
                     </span>
                     <p>
-                        人工审核后入账
+                        识别结果未经人工核实
                         <br />
-                        不自动读取微信聊天
+                        仅接收上传或 API 图片
                     </p>
                     <button id="logout-button" class="button subtle full-width" type="button">
                         退出工作台
@@ -261,27 +262,27 @@
                                     OVERVIEW
                                 </div>
                                 <h1>
-                                    订单工作台
+                                    上传截图，提取信息
                                 </h1>
                                 <p>
-                                    先核对证据，再确认订单。所有处理进度集中在这里。
+                                    页面上传或 API 接入，直接获取结构化识别结果。审核与订单导出可按需继续。
                                 </p>
                             </div>
                             <button id="open-upload" class="button primary" type="button">
                                 <span aria-hidden="true"><svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 4v12 M4 10h12" vector-effect="non-scaling-stroke" /></svg></span>
-                                导入截图
+                                上传识别
                             </button>
                         </div>
                         <section class="stat-row" aria-label="任务概览">
                             <button class="stat-card" id="stat-review" type="button">
                                 <span>
-                                    待人工审核
+                                    提取完成
                                 </span>
                                 <strong id="count-review">
                                     0
                                 </strong>
                                 <small>
-                                    进入审核队列
+                                    查看识别结果
                                     <span aria-hidden="true"><svg class="ui-icon icon-directional" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 15 15 5 M5 5h10v10" vector-effect="non-scaling-stroke" /></svg></span>
                                 </small>
                             </button>
@@ -293,7 +294,7 @@
                                     0
                                 </strong>
                                 <small>
-                                    等待候选生成
+                                    等待提取完成
                                 </small>
                             </button>
                             <button class="stat-card" id="stat-failed" type="button">
@@ -304,12 +305,12 @@
                                     0
                                 </strong>
                                 <small>
-                                    识别失败，可重试或驳回
+                                    识别失败，可手动重试
                                 </small>
                             </button>
                             <button class="stat-card" id="stat-confirmed" type="button">
                                 <span>
-                                    已确认任务
+                                    下游已确认
                                 </span>
                                 <strong id="count-confirmed">
                                     0
@@ -323,7 +324,7 @@
                             <section class="panel">
                                 <div class="panel-heading">
                                     <h2>
-                                        下一步工作
+                                        最近图片任务
                                     </h2>
                                     <button id="dashboard-review" class="button subtle small" type="button">
                         查看全部 <svg class="ui-icon icon-directional" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" vector-effect="non-scaling-stroke" /></svg>
@@ -338,10 +339,10 @@
                             <section class="panel workflow-panel">
                                 <div class="panel-heading">
                                     <h2>
-                                        本地处理流程
+                                        图片识别流程
                                     </h2>
                                     <span class="badge neutral">
-                                        人工确认
+                                        结果未经核实
                                     </span>
                                 </div>
                                 <ol class="workflow">
@@ -351,10 +352,10 @@
                                         </span>
                                         <div>
                                             <strong>
-                                                导入原始证据
+                                                接收已授权图片
                                             </strong>
                                             <p>
-                                                截图存储在本机，重复图片按来源标签去重。
+                                                图片存储在本机；来源备注仅为数据，不代表调用方身份。
                                             </p>
                                         </div>
                                     </li>
@@ -364,10 +365,10 @@
                                         </span>
                                         <div>
                                             <strong>
-                                                审核候选与异常
+                                                模型提取信息
                                             </strong>
                                             <p>
-                                                核实客户、商品、数量和单价。未知值不自动补齐。
+                                                保留原文证据，缺失与不确定字段不自动补齐。
                                             </p>
                                         </div>
                                     </li>
@@ -377,10 +378,10 @@
                                         </span>
                                         <div>
                                             <strong>
-                                                保存正式订单
+                                                读取结构化结果
                                             </strong>
                                             <p>
-                                                新增、改单和撤单均保留事件与版本。
+                                                提取完成即可查看，无需先审核或匹配商品目录。
                                             </p>
                                         </div>
                                     </li>
@@ -390,10 +391,10 @@
                                         </span>
                                         <div>
                                             <strong>
-                                                生成 Excel 快照
+                                                按需继续下游流程
                                             </strong>
                                             <p>
-                                                仅导出已确认记录，撤单状态同样保留。
+                                                审核、正式订单与 Excel 为可选流程；只有人工确认的订单可入账。
                                             </p>
                                         </div>
                                     </li>
@@ -417,6 +418,90 @@
                             </div>
                         </section>
                     </section>
+
+                    <section id="results-view" class="page-view" hidden>
+                        <div class="page-heading"><div><div class="eyebrow">RECOGNITION RESULTS</div><h1>识别结果</h1><p>原始模型提取可直接读取。结果未经人工核实，不等于确认订单入账。</p></div><button id="results-upload" class="button primary" type="button">上传识别</button></div>
+                        <div class="recognition-layout">
+                            <section class="panel recognition-list-panel" aria-label="图片识别任务">
+                                <div class="panel-heading"><h2>图片任务</h2><span id="results-count" class="tiny muted"></span></div>
+                                <label class="field-help" for="results-search">搜索来源备注、文件名或任务 ID</label><input id="results-search" type="search" maxlength="200" autocomplete="off" placeholder="搜索图片任务" />
+                                <div id="results-list" class="recognition-list" role="region" tabindex="0" aria-label="图片任务列表" aria-live="polite" aria-busy="false"></div>
+                                <div class="recognition-pages"><button id="results-previous" class="button small secondary" type="button" disabled>上一页</button><button id="results-next" class="button small secondary" type="button" disabled>下一页</button></div>
+                            </section>
+                            <section id="result-detail" class="panel recognition-detail" aria-label="原始识别结果" tabindex="-1"><h2>选择一张图片</h2><p class="muted">查看处理状态、原始提取字段、证据与不确定原因。</p></section>
+                        </div>
+                    </section>
+                    <section id="api-view" class="page-view" hidden>
+                        <div class="page-heading"><div><div class="eyebrow">API INTEGRATION</div><h1>API 接入</h1><p>来源系统负责获得图片。本服务接收图片文件，异步提取并返回未经人工核实的结构化结果。</p></div></div>
+                        <div class="api-guide">
+                            <section class="panel"><h2>接入与授权</h2><p>默认仅监听本机 127.0.0.1。请求携带现有本地访问令牌，模型 API 密钥留在后端。下列令牌与图片路径均为占位符；页面不会创建凭据。</p>
+                            <p>先读取 <code>GET /api/model-settings</code>，核对 provider、base_url、model、revision 和 allow_external。必须先配置真实图片模型；正式入口在 demo 下返回 <code>MODEL_NOT_CONFIGURED</code>，不会假识别。保存配置不联网。</p>
+                            <p>调用方须明确授权当前目的地、本次完整图片与识别用途，并接受供应商费用。外部开关关闭时，在授权后调用 <code>POST /api/model-settings/enable-external</code>，JSON 为 <code>{"expected_revision": 1, "confirm_external": true}</code>，再使用返回的新 revision。每次上传仍须发送 <code>config_revision</code> 与 <code>confirm_external=true</code>。禁用或更换模型后，旧任务不会暗中外传。</p>
+                            <p>不接收外部图片 URL，不访问图片中的链接或执行其指令。<code>source_label</code> 只是可选备注，不是身份凭据。</p></section>
+                            <section class="panel"><h2>1. 上传一张虚构图片</h2><p>单图 multipart：<code>file</code>、可选 <code>source_label</code>、可选 <code>idempotency_key</code>（8–100 字符）、当前 <code>config_revision</code> 与本图授权。返回 HTTP 202 和 task_id。</p>
+                            <pre class="api-code" tabindex="0" aria-label="curl 上传示例"><code>curl -X POST "http://127.0.0.1:8000/api/recognitions" \
+  -H "Authorization: Bearer &lt;LOCAL_ACCESS_TOKEN&gt;" \
+  -F "file=@synthetic.png;type=image/png" \
+  -F "source_label=synthetic-example" \
+  -F "idempotency_key=synthetic-request-001" \
+  -F "config_revision=&lt;CURRENT_REVISION&gt;" \
+  -F "confirm_external=true"</code></pre>
+                            <p>仅支持实际可解码的静态 PNG、JPEG、WebP。单次一张、默认最大 10 MiB、最多 2 千万像素，声明类型必须与实际内容一致。当前限制以 <code>GET /api/config</code> 为准。多图分别提交，不保证整个批次原子成功。</p>
+                            <p>同幂等键同有效载荷或同图同来源备注复用任务，不重复识别；同键不同载荷返回 <code>IDEMPOTENCY_CONFLICT</code>。更换备注可明确创建独立图片任务，不自动合并业务订单。</p></section>
+                            <section class="panel"><h2>2. 轮询状态并读取结果</h2>
+                            <pre class="api-code" tabindex="0" aria-label="curl 状态与结果示例"><code>curl "http://127.0.0.1:8000/api/recognitions/&lt;TASK_ID&gt;" \
+  -H "Authorization: Bearer &lt;LOCAL_ACCESS_TOKEN&gt;"
+curl "http://127.0.0.1:8000/api/recognitions/&lt;TASK_ID&gt;/result" \
+  -H "Authorization: Bearer &lt;LOCAL_ACCESS_TOKEN&gt;"</code></pre>
+                            <p><code>received → recognizing → succeeded</code>，失败为 <code>failed</code>。建议每 2 秒轮询，设置调用方总超时。成功结果包含 <code>schema_version</code>、<code>task_id</code>、<code>status</code>、<code>verified:false</code>、<code>recognition_mode</code>、独立 <code>review_status</code> 与原始 <code>result</code>；result 包含 events、evidence、warnings 与 missing_reasons。数量与金额为十进制字符串；未知值保持 null。</p>
+                            <pre class="api-code" tabindex="0" aria-label="Python 提交和轮询示例"><code>import os
+import time
+import requests
+
+base = "http://127.0.0.1:8000"
+headers = {"Authorization": "Bearer " + os.environ["OCRS_LOCAL_TOKEN"]}
+# 先核对目的地并获得本图授权；填写启用后的当前版本。
+revision = "&lt;CURRENT_REVISION&gt;"
+with open("synthetic.png", "rb") as image:
+    response = requests.post(base + "/api/recognitions",
+        headers=headers, files={"file": ("synthetic.png", image, "image/png")},
+        data={"source_label": "synthetic-example",
+              "idempotency_key": "synthetic-request-001",
+              "config_revision": revision, "confirm_external": "true"},
+        timeout=30)
+response.raise_for_status()
+task_id = response.json()["task_id"]
+for _ in range(60):
+    status = requests.get(base + "/api/recognitions/" + task_id,
+                          headers=headers, timeout=15)
+    status.raise_for_status()
+    task = status.json()
+    if task["status"] == "failed":
+        raise RuntimeError(task["error_code"])
+    if task["status"] == "succeeded":
+        result = requests.get(base + "/api/recognitions/" + task_id + "/result",
+                              headers=headers, timeout=15)
+        result.raise_for_status()
+        print(result.json())  # 仅虚构示例；生产结果避免写日志
+        break
+    time.sleep(2)
+else:
+    raise TimeoutError("本次等待结束；保留 task_id，稍后查询")</code></pre></section>
+                            <section class="panel"><h2>错误与兼容边界</h2><div class="api-errors" role="region" tabindex="0" aria-label="常见 API 错误"><table class="api-error-table"><thead><tr><th>HTTP / 错误码</th><th>处理方式</th></tr></thead><tbody>
+                            <tr><td>401 UNAUTHORIZED</td><td>核对本地访问令牌；不在 URL 或日志中传递。</td></tr>
+                            <tr><td>400 IMAGE_INVALID / IMAGE_TYPE_MISMATCH</td><td>上传实际有效、类型匹配的静态图片。</td></tr>
+                            <tr><td>413 IMAGE_TOO_LARGE</td><td>缩小文件或图片像素。</td></tr>
+                            <tr><td>409 MODEL_NOT_CONFIGURED / MODEL_DISABLED</td><td>配置真实模型；核对明确外传授权和开关。</td></tr>
+                            <tr><td>409 MODEL_CONSENT_REQUIRED / MODEL_CONFIG_CHANGED</td><td>重新核对目的地、当前版本与本图范围，明确授权后提交或重试。</td></tr>
+                            <tr><td>409 RESULT_NOT_READY / RECOGNITION_FAILED</td><td>未完成时继续查询；失败时检查安全 error_code，不自动切换 demo。</td></tr>
+                            <tr><td>409 DEMO_SOURCE_CONFLICT</td><td>旧 demo 同图同来源已存在；更换来源备注再真实识别，保留演示数据。</td></tr>
+                            <tr><td>409 IDEMPOTENCY_CONFLICT</td><td>同键只能重放原请求；新图片使用新键。</td></tr>
+                            <tr><td>429 QUEUE_FULL</td><td>队列容量已满，稍后按同键重试。单进程、一个识别 worker。</td></tr>
+                            <tr><td>410 EVIDENCE_EXPIRED</td><td>原图已清理，识别证据无法恢复。</td></tr>
+                            </tbody></table></div><p>完整字段与实时限制可通过鉴权的 <code>GET /api/openapi.json</code> 和 <code>GET /api/config</code> 查询。旧 <code>/api/uploads</code> 与 <code>/api/tasks</code> 保留兼容及显式离线演示；审核、订单与 Excel 为可选下游。文件夹导入已停用，不再启动来源扫描；已有数据保留。</p>
+                            <button id="api-schema" class="button secondary" type="button">查看当前 OpenAPI 契约</button><pre id="api-schema-content" class="api-code" tabindex="0" aria-label="当前 OpenAPI 契约" hidden></pre><p id="api-schema-error" class="form-error" role="alert" hidden></p></section>
+                        </div>
+                    </section>
                     <section id="review-view" class="page-view" hidden>
                         <div class="page-heading">
                             <div>
@@ -427,11 +512,11 @@
                                     审核队列
                                 </h1>
                                 <p>
-                                    候选尚未入账。对照原始截图，逐项核实后提交。
+                                    可选下游：识别结果已可读取。只有需要入账时，才在此核实并确认订单。
                                 </p>
                             </div>
                             <button id="review-upload" class="button primary" type="button">
-                        <svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 4v12 M4 10h12" vector-effect="non-scaling-stroke" /></svg> 导入截图
+                        <svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 4v12 M4 10h12" vector-effect="non-scaling-stroke" /></svg> 上传识别
                     </button>
                         </div>
                         <section id="queue-panel" class="queue-panel panel" aria-label="识别任务队列">
@@ -505,10 +590,10 @@
                                 demo 模式仅产生虚构示例。
                             </p>
                             <button id="empty-upload" class="button secondary" type="button">
-                                导入截图
+                                上传识别
                             </button>
                             <p id="inbox-note" class="empty-note">
-                                仅处理手动导入的截图，不读取微信聊天。
+                                仅接收页面上传或 API 提交的图片，不自动采集来源。
                             </p>
                         </section>
                         <section id="task-workspace" class="task-workspace" hidden>
@@ -921,18 +1006,18 @@
                             IMPORT SCREENSHOTS
                         </span>
                         <h2 id="upload-title">
-                            导入订单截图
+                            上传图片
                         </h2>
                     </div>
-                    <button class="icon-button" id="close-upload" type="button" aria-label="关闭导入窗口">
+                    <button class="icon-button" id="close-upload" type="button" aria-label="关闭上传窗口">
                         <svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 5l10 10 M15 5 5 15" vector-effect="non-scaling-stroke" /></svg>
                     </button>
                 </div>
                 <p class="muted">
-                    每张截图建立一条任务，可包含多笔订单。仅导入你有权处理的资料。点击上传后会显示当前模型、目的地与费用提示；尚未开启外部调用时，可在此一并明确开启，无需重新选图。
+                    每张图片建立一条任务。多图逐张提交，非事务批次；前面的图片可能已接收。仅上传你有权处理的资料。真实识别须确认当前模型目的地和本次完整图片的外传范围，可能产生费用。
                 </p>
                 <p id="upload-mode-note" class="inline-warning" hidden>
-                    当前为 demo 模式：不会读取图中文字，只返回虚构候选。请使用完全虚构的图片。
+                    离线演示，不执行 OCR：只返回与图片无关的虚构候选。正式 API 不接受 demo。请使用完全虚构的图片。
                 </p>
                 <label id="file-drop" class="file-drop" for="upload-files">
                     <span class="upload-symbol" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 12v5h14v-5 M10 13V3 M6 7l4-4 4 4" vector-effect="non-scaling-stroke" /></svg></span>
@@ -953,11 +1038,11 @@
                 <div id="selected-files" class="selected-files">
                 </div>
                 <label for="source-label">
-                    来源标签（选填）
+                    来源备注（选填）
                 </label>
                 <input id="source-label" maxlength="200" placeholder="例如：虚构客户 A / 手动保存" autocomplete="off" />
                 <p class="field-help">
-                    相同图片与来源标签会复用原记录。同图属于不同业务场景时，请使用不同标签。
+                    相同图片与来源备注复用原记录；备注不作为身份或模型指令。同图属于不同业务场景时，请使用不同备注。
                 </p>
                 <p id="upload-error" class="form-error" role="alert" hidden>
                 </p>

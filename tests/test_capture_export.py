@@ -147,7 +147,12 @@ def test_watcher_skips_nested_directories_symlinks_and_other_files(tmp_path: Pat
     nested.mkdir()
     real = nested / "hidden.png"
     real.write_bytes(image_bytes())
-    (tmp_path / "alias.png").symlink_to(real)
+    try:
+        (tmp_path / "alias.png").symlink_to(real)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link creation privilege")
+        raise
     (tmp_path / "text.txt").write_bytes(image_bytes())
     imported: list[bytes] = []
     watcher = InboxWatcher(tmp_path, lambda data, *_: imported.append(data))
@@ -564,7 +569,12 @@ def test_export_refuses_symlink_destination(tmp_path: Path) -> None:
     existing = tmp_path / "existing.xlsx"
     existing.write_bytes(b"Do not overwrite")
     link = tmp_path / "linked.xlsx"
-    link.symlink_to(existing)
+    try:
+        link.symlink_to(existing)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link creation privilege")
+        raise
     with pytest.raises(ExportError) as error:
         write_workbook([formal_order()], link)
     assert error.value.code == "export_invalid_destination"

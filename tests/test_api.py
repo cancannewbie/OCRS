@@ -107,6 +107,42 @@ def test_unauthorized_malformed_body_is_rejected_before_parsing(client: TestClie
     assert response.status_code == 401
 
 
+def test_authenticated_malformed_multipart_has_a_safe_stable_error(client: TestClient) -> None:
+    response = client.post(
+        "/api/recognitions",
+        content=b"FICTIONAL_PRIVATE_VALUE",
+        headers={**AUTH, "Content-Type": "multipart/form-data"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "MULTIPART_INVALID"
+    assert "FICTIONAL_PRIVATE_VALUE" not in response.text
+    assert "detail" not in response.json()
+    assert client.get("/api/tasks", headers=AUTH).json()["tasks"] == []
+
+
+def test_unexpected_api_failure_has_no_exception_or_path_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    migrate(tmp_path)
+    app = create_app(Settings(data_dir=tmp_path, token=TOKEN), start_worker=False)
+
+    def broken() -> dict[str, Any]:
+        raise RuntimeError("FICTIONAL_PRIVATE_FAILURE C:/fictional/private/ocrs.sqlite3")
+
+    monkeypatch.setattr(app.state.service, "status", broken)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/status", headers=AUTH)
+    # The HTTP boundary must also suppress re-raising to the ASGI server logger.
+    with TestClient(app, raise_server_exceptions=True) as client:
+        assert client.get("/api/status", headers=AUTH).status_code == 500
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "INTERNAL_ERROR"
+    assert response.headers["cache-control"] == "no-store"
+    for private in ("FICTIONAL_PRIVATE_FAILURE", "C:/fictional/private", TOKEN):
+        assert private not in response.text and private not in caplog.text
+    assert "INTERNAL_ERROR" in caplog.text
+
+
 def test_full_upload_review_download_flow(client: TestClient) -> None:
     task, payload = ready_payload(client)
     source = client.get(task["sources"][0]["url"], headers=AUTH)
@@ -238,6 +274,15 @@ def test_large_declared_body_rejected_before_reading(client: TestClient) -> None
             "Content-Length": str(100 * 1024 * 1024),
         },
     )
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "UPLOAD_TOO_LARGE"
+
+
+@pytest.mark.parametrize("path", ["/api/recognitions", "/"])
+def test_extremely_long_content_length_is_rejected_without_integer_conversion(
+    client: TestClient, path: str
+) -> None:
+    response = client.post(path, content=b"", headers={**AUTH, "Content-Length": "9" * 5000})
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "UPLOAD_TOO_LARGE"
 

@@ -2987,3 +2987,45 @@ main#main-content {
         outline-color: Highlight;
     }
 }
+
+
+/* Source-independent recognition keeps the workbench tokens and surfaces. */
+.nav-section-label { margin: 12px 11px 2px; color: var(--faint); font-size: 11px; }
+.recognition-layout { display: grid; grid-template-columns: minmax(250px, .8fr) minmax(0, 1.7fr); gap: 24px; align-items: start; }
+.recognition-list-panel, .recognition-detail, .api-guide > .panel { padding: 24px; min-width: 0; }
+.recognition-list-panel > input { width: 100%; }
+.recognition-list { display: grid; gap: 8px; margin-top: 16px; }
+.recognition-task { width: 100%; display: grid; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: #fff; text-align: left; overflow-wrap: anywhere; }
+.recognition-task[aria-pressed="true"] { border-color: var(--primary); background: var(--primary-soft); }
+.recognition-task .badge { justify-self: start; }
+.recognition-pages { display: flex; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.recognition-detail h2 { margin-top: 0; }
+.recognition-detail p, .api-guide p { line-height: 1.7; overflow-wrap: anywhere; }
+.recognition-result-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 16px 0; }
+.recognition-result-fields > div { min-width: 0; }
+.recognition-result-fields dt { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.recognition-result-fields dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.recognition-record { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--border); }
+.recognition-evidence { white-space: pre-wrap; overflow-wrap: anywhere; }
+.api-guide { display: grid; gap: 24px; max-width: 1100px; }
+.api-guide h2 { margin-top: 0; }
+.api-code { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 16px; line-height: 1.7; font-size: 12px; max-width: 100%; }
+.api-errors { overflow: auto; overscroll-behavior: contain; }
+.api-error-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.api-error-table th, .api-error-table td { padding: 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+@media (max-width: 980px) { .recognition-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 720px) {
+    .nav-section-label { display: none; }
+    .recognition-list-panel, .recognition-detail, .api-guide > .panel { padding: 18px; }
+    .recognition-result-fields { grid-template-columns: minmax(0, 1fr); }
+    .recognition-task { min-height: 44px; }
+    .api-error-table th, .api-error-table td { padding: 8px; }
+}
+
+.result-source-card { margin: 12px 0; }
+.result-source-card img { width: 100%; max-height: 540px; object-fit: contain; outline: 1px solid oklch(0 0 0 / 0.1); outline-offset: -1px; }
+
+.recognition-list { max-height: 560px; overflow: auto; overscroll-behavior: contain; }
+.recognition-detail details .api-code { max-height: 480px; overflow: auto; overscroll-behavior: contain; }
+#api-schema-content { max-height: 600px; overflow: auto; overscroll-behavior: contain; }
+@media (max-width: 720px) { .recognition-list { max-height: 360px; } }

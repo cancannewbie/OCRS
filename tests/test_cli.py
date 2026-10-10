@@ -64,7 +64,7 @@ def test_init_is_idempotent_and_token_is_private(
     invoke(monkeypatch, root, "token")
     assert capsys.readouterr().out.strip() == token
     with connect(root) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -89,7 +89,7 @@ def test_backup_restore_preserves_references_order_versions_and_replays_outbox(
     assert new.orders() == snapshot
     assert new.task(task["id"])["status"] == "confirmed"
     with connect(restored) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
         assert db.execute("SELECT count(*) FROM exports").fetchone()[0] == 0
@@ -147,7 +147,12 @@ def test_restore_rejects_symlink_in_backup_before_copying(
     outside = tmp_path / "outside.png"
     outside.write_bytes(path.read_bytes())
     path.unlink()
-    path.symlink_to(outside)
+    try:
+        path.symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link creation privilege")
+        raise
     target = tmp_path / "restored"
     with pytest.raises(SystemExit):
         invoke(monkeypatch, target, "restore", str(source))

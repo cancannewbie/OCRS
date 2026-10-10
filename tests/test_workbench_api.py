@@ -42,7 +42,7 @@ def test_configuration_is_explicit_safe_allowlist(tmp_path: Path) -> None:
         assert response.headers["cache-control"] == "no-store"
         assert response.json() == {
             "version": __version__,
-            "schema_version": 3,
+            "schema_version": 4,
             "provider": "demo",
             "recognition_mode": "demo",
             "model_configured": False,
@@ -50,6 +50,11 @@ def test_configuration_is_explicit_safe_allowlist(tmp_path: Path) -> None:
             "inbox_enabled": False,
             "max_upload_bytes": 10 * 1024 * 1024,
             "max_upload_files": 8,
+            "recognition_max_files": 1,
+            "max_image_pixels": 20_000_000,
+            "max_pending_tasks": 100,
+            "recognition_concurrency": 1,
+            "recognition_api": "/api/recognitions",
             "evidence_days": 30,
             "sku_catalog": ["DEMO-001", "DEMO-002"],
             "supported_currencies": ["CNY", "EUR", "GBP", "JPY", "USD"],

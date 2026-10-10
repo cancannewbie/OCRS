@@ -17,6 +17,7 @@ class Settings:
     inbox: Path | None = None
     sku_catalog: frozenset[str] = frozenset({"DEMO-001"})
     max_upload_bytes: int = 10 * 1024 * 1024
+    max_pending_tasks: int = 100
     max_requests: int = 100
     evidence_days: int = 30
     model_timeout_seconds: int = 15
@@ -35,7 +36,8 @@ class Settings:
         # Model settings are entered only through the authenticated local page.
         # Legacy model environment variables are deliberately not imported: doing
         # so could silently send a previous queue to an unreviewed destination.
-        inbox = os.getenv("OCRS_INBOX", "")
+        # Legacy OCRS_INBOX is deliberately inert: input is now an explicit
+        # authenticated file upload, never an automatically scanned directory.
         catalog = frozenset(
             s.strip() for s in os.getenv("OCRS_SKUS", "DEMO-001").split(",") if s.strip()
         )
@@ -44,6 +46,5 @@ class Settings:
         return cls(
             root.resolve(),
             token,
-            inbox=Path(inbox).expanduser().absolute() if inbox else None,
             sku_catalog=catalog,
         )

@@ -13,13 +13,15 @@ from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from filelock import FileLock
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ocrs import __version__
-from ocrs.capture import CaptureError, InboxWatcher
+from ocrs.capture import MAX_IMAGE_PIXELS, CaptureError
 from ocrs.config import Settings
 from ocrs.domain import CURRENCY_MINOR_UNITS
 from ocrs.model_settings import (
@@ -29,6 +31,7 @@ from ocrs.model_settings import (
     ModelSettingsUpdate,
 )
 from ocrs.providers import OpenAICompatibleProvider, ProviderError
+from ocrs.recognition_contracts import ErrorResponse, RecognitionResult, RecognitionTask
 from ocrs.security import RequestGuard
 from ocrs.service import AppError, CandidateRevision, Confirmation, ReviewReopen, Service
 from ocrs.storage import SCHEMA_VERSION, connect
@@ -70,20 +73,10 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     service = Service(settings, model_store=model_store)
     stop = threading.Event()
     lock = FileLock(str(settings.data_dir / "service.lock"), timeout=0)
-    watcher = (
-        InboxWatcher(
-            settings.inbox,
-            lambda data, mime, label: _ingest_inbox(service, data, label),
-        )
-        if settings.inbox
-        else None
-    )
 
     def worker() -> None:
         while not stop.is_set():
             try:
-                if watcher:
-                    service.record_inbox(dict(watcher.scan_once()))
                 worked = service.process_one()
             except Exception:
                 # Safe boundary logging, never customer data or third-party exception strings.
@@ -111,7 +104,8 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
             lock.release()
 
     app = FastAPI(
-        title="OCRS 本地订单审核",
+        title="OCRS 本地图片识别",
+        version=__version__,
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -130,11 +124,25 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
                 {"error": {"code": "ORIGIN_DENIED", "message": "禁止跨站请求"}}, status_code=403
             )
         length = request.headers.get("content-length")
-        if length and (not length.isdigit() or int(length) > settings.max_upload_bytes * 8 + 65536):
+        body_limit = (
+            settings.max_upload_bytes * (1 if request.url.path == "/api/recognitions" else 8)
+            + 65536
+        )
+        if length and (
+            len(length) > 20
+            or not length.isascii()
+            or not length.isdigit()
+            or int(length) > body_limit
+        ):
             return JSONResponse(
                 {"error": {"code": "UPLOAD_TOO_LARGE", "message": "请求过大"}}, status_code=413
             )
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # Catch before ServerErrorMiddleware can re-raise the exception to
+            # uvicorn and log a traceback containing private adapter/path data.
+            response = await internal_error(request, exc)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -145,7 +153,12 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
         )
         return response
 
-    def authenticate(authorization: Annotated[str | None, Header()] = None) -> None:
+    bearer = HTTPBearer(auto_error=False, scheme_name="LocalBearerToken")
+
+    def authenticate(
+        authorization: Annotated[str | None, Header()] = None,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)] = None,
+    ) -> None:
         expected = "Bearer " + settings.token
         if authorization is None or not hmac.compare_digest(
             authorization.encode(), expected.encode()
@@ -154,11 +167,50 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
 
     auth = [Depends(authenticate)]
 
+    async def recognition_form(request: Request) -> None:
+        form = await request.form()
+        allowed = {"file", "source_label", "idempotency_key", "config_revision", "confirm_external"}
+        if set(form) - allowed or any(len(form.getlist(key)) != 1 for key in form if key != "file"):
+            raise AppError("VALIDATION_ERROR", "仅支持声明的识别表单字段且不得重复", 422)
+        if not form.getlist("file"):
+            raise AppError("VALIDATION_ERROR", "请提供 file 图片文件", 422)
+        if len(form.getlist("file")) != 1:
+            raise AppError("UPLOAD_COUNT", "正式识别接口每次接收一张图片")
+
     @app.exception_handler(AppError)
     async def app_error(request: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(
             {"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
             status_code=exc.status,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        codes = {400: "MULTIPART_INVALID", 404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED"}
+        return JSONResponse(
+            {
+                "error": {
+                    "code": codes.get(exc.status_code, "HTTP_ERROR"),
+                    "message": "请求无法处理，请检查地址、方法与表单格式",
+                    "details": None,
+                }
+            },
+            status_code=exc.status_code,
+        )
+
+    @app.exception_handler(Exception)
+    async def internal_error(request: Request, exc: Exception) -> JSONResponse:
+        logging.getLogger("ocrs.api").error('{"error_code":"INTERNAL_ERROR"}')
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "服务暂时无法处理请求",
+                    "details": None,
+                }
+            },
+            status_code=500,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
     @app.exception_handler(ModelSettingsError)
@@ -205,6 +257,10 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     def status() -> dict[str, Any]:
         return service.status()
 
+    @app.get("/api/openapi.json", dependencies=auth, include_in_schema=False)
+    def openapi() -> dict[str, Any]:
+        return app.openapi()
+
     @app.get("/api/config", dependencies=auth)
     def configuration() -> dict[str, Any]:
         # Explicit allowlist: never serialize credentials or local paths.
@@ -218,9 +274,14 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
             "external_transmission_enabled": (
                 current["provider"] != "demo" and current["allow_external"]
             ),
-            "inbox_enabled": settings.inbox is not None,
+            "inbox_enabled": False,
             "max_upload_bytes": settings.max_upload_bytes,
             "max_upload_files": 8,
+            "recognition_max_files": 1,
+            "max_image_pixels": MAX_IMAGE_PIXELS,
+            "max_pending_tasks": settings.max_pending_tasks,
+            "recognition_concurrency": 1,
+            "recognition_api": "/api/recognitions",
             "evidence_days": settings.evidence_days,
             "sku_catalog": sorted(settings.sku_catalog),
             "supported_currencies": sorted(CURRENCY_MINOR_UNITS),
@@ -257,8 +318,15 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
         passed = False
         failure_code = None
         try:
-            provider.test_connection()
+            with service._dispatch_lock:
+                with service._model_lock:
+                    _, current_revision = service.runtime_settings()
+                    if current_revision != revision:
+                        raise AppError("MODEL_SETTINGS_CONFLICT", "配置已改变，请重新载入", 409)
+                provider.test_connection()
             passed = True
+        except AppError:
+            raise
         except ProviderError as exc:
             failure_code = exc.code
         except Exception:
@@ -292,7 +360,91 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     def task(task_id: str) -> dict[str, Any]:
         return service.task(task_id)
 
-    @app.post("/api/uploads", dependencies=auth)
+    recognition_errors: dict[int | str, dict[str, Any]] = {
+        status: {"model": ErrorResponse, "description": description}
+        for status, description in {
+            400: "IMAGE_INVALID / IMAGE_TYPE_MISMATCH / IMAGE_ANIMATED / "
+            "UPLOAD_COUNT / SOURCE_INVALID / MULTIPART_INVALID",
+            401: "UNAUTHORIZED",
+            409: "MODEL_NOT_CONFIGURED / MODEL_DISABLED / MODEL_CONSENT_REQUIRED / "
+            "IDEMPOTENCY_CONFLICT / DEMO_SOURCE_CONFLICT",
+            410: "EVIDENCE_EXPIRED",
+            413: "IMAGE_TOO_LARGE / IMAGE_TOO_MANY_PIXELS / UPLOAD_TOO_LARGE",
+            415: "IMAGE_UNSUPPORTED",
+            422: "VALIDATION_ERROR",
+            429: "QUEUE_FULL",
+            500: "INTERNAL_ERROR",
+        }.items()
+    }
+
+    @app.post(
+        "/api/recognitions",
+        dependencies=[*auth, Depends(recognition_form)],
+        status_code=202,
+        response_model=RecognitionTask,
+        responses=recognition_errors,
+        summary="提交单张图片进行异步提取",
+        description="只接收 PNG/JPEG/WebP 文件，不抓取 URL。source_label 是可选来源备注，"
+        "不代表账号身份或指令。config_revision 绑定已核对的模型目的地；"
+        "confirm_external=true 仅授权本次图片范围。幂等重放与同图同来源复用"
+        "已有任务，不重新识别或续期授权。结果未经人工核实。",
+    )
+    def recognize(
+        file: Annotated[
+            UploadFile,
+            File(
+                description="单张静态 PNG/JPEG/WebP，须与声明MIME一致",
+                json_schema_extra={"format": "binary"},
+            ),
+        ],
+        source_label: Annotated[str, Form(max_length=200)] = "manual",
+        idempotency_key: Annotated[str | None, Form(min_length=8, max_length=100)] = None,
+        config_revision: Annotated[int | None, Form(ge=0)] = None,
+        confirm_external: Annotated[bool, Form()] = False,
+    ) -> dict[str, Any]:
+        return service.submit_recognition(
+            file.file.read(settings.max_upload_bytes + 1),
+            file.filename or "image",
+            file.content_type,
+            source_label,
+            idempotency_key=idempotency_key,
+            config_revision=config_revision,
+            confirm_external=confirm_external,
+        )
+
+    @app.get(
+        "/api/recognitions/{task_id}",
+        dependencies=auth,
+        response_model=RecognitionTask,
+        responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+        summary="查询提取任务状态",
+    )
+    def recognition_status(task_id: str) -> dict[str, Any]:
+        return service.recognition_task(task_id)
+
+    @app.get(
+        "/api/recognitions/{task_id}/result",
+        dependencies=auth,
+        response_model=RecognitionResult,
+        responses={
+            401: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse, "description": "RESULT_NOT_READY / RECOGNITION_FAILED"},
+            410: {"model": ErrorResponse, "description": "EVIDENCE_EXPIRED"},
+        },
+        summary="读取本次任务的原始模型提取结果",
+        description="候选无需完成商品映射或人工审核即可读取。人工修订、确认和导出不改变"
+        "此模型候选；返回 verified=false，不等于正式订单。",
+    )
+    def recognition_result(task_id: str) -> dict[str, Any]:
+        return service.recognition_result(task_id)
+
+    @app.post(
+        "/api/uploads",
+        dependencies=auth,
+        deprecated=True,
+        description="兼容批量人工导入与显式虚构 demo；新接入使用 /api/recognitions",
+    )
     def upload(
         files: Annotated[list[UploadFile], File()],
         source_label: Annotated[str, Form()] = "manual",
@@ -404,7 +556,10 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
         )
 
     app.add_middleware(
-        RequestGuard, token=settings.token, max_bytes=settings.max_upload_bytes * 8 + 65536
+        RequestGuard,
+        token=settings.token,
+        max_bytes=settings.max_upload_bytes * 8 + 65536,
+        recognition_max_bytes=settings.max_upload_bytes + 65536,
     )
     app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")
     return app

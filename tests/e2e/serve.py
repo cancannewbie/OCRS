@@ -48,7 +48,9 @@ def synthetic_model_response(request: httpx.Request) -> httpx.Response:
     if model == "synthetic-invalid-json":
         result = "{synthetic malformed candidate"
     else:
-        assert model == "synthetic-vision-model", "Only explicit synthetic models are permitted"
+        assert model in {"synthetic-vision-model", "synthetic-unmapped-model"}, (
+            "Only explicit synthetic models are permitted"
+        )
         result = json.dumps(
             {
                 "schema_version": "1",
@@ -60,11 +62,15 @@ def synthetic_model_response(request: httpx.Request) -> httpx.Response:
                         "currency": "CNY",
                         "items": [
                             {
-                                "sku": "DEMO-001",
+                                "sku": "SYNTHETIC-UNMAPPED"
+                                if model == "synthetic-unmapped-model"
+                                else "DEMO-001",
                                 "name": "SYNTHETIC Vision Box",
-                                "quantity": "2.5",
+                                "quantity": None if model == "synthetic-unmapped-model" else "2.5",
                                 "unit": "box",
-                                "unit_price": "12.40",
+                                "unit_price": None
+                                if model == "synthetic-unmapped-model"
+                                else "12.40",
                             }
                         ],
                         "evidence": [

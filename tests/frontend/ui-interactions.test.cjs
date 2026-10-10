@@ -113,7 +113,7 @@ test("upload busy state clears on logout and stale responses cannot clear a new 
     current.resolve(json({ tasks: [], duplicates: [] })); await flush();
     assert.equal(app.id("upload-submit").getAttribute("aria-busy"), "false");
     assert.equal(app.id("upload-form").getAttribute("aria-busy"), "false");
-    assert.match(app.id("upload-submit").textContent, /上传并识别/);
+    assert.match(app.id("upload-submit").textContent, /运行离线演示/);
 });
 
 test("failed candidate saves clear busy feedback while retaining the editable correction", async (t) => {
