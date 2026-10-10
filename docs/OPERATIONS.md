@@ -41,10 +41,10 @@ Windows PowerShell 可用 `Copy-Item .env.example .env`（确认原文件不存�
 | --- | --- | --- |
 | `OCRS_DATA_DIR` | `~/.ocrs` | 数据根目录，可展开 `~`。为不同演练使用独立目录。 |
 | `OCRS_ACCESS_TOKEN` | 空 | 空时读取数据目录内 `access-token`；设置时覆盖该文件，至少 32 字符。只使用私有随机值。 |
-| `OCRS_PROVIDER` | `demo` | `demo` 或 `openai-compatible`；默认虚构结果，不执行 OCR。 |
+| `OCRS_PROVIDER` | `demo` | `demo`、`openai-compatible` 或 `minimax-cn`；默认虚构结果，不执行 OCR。 |
 | `OCRS_ALLOW_EXTERNAL` | `false` | 只有显式 `true` 才允许启用真实模型；这不代替客户数据处理授权。 |
-| `OCRS_MODEL_URL` | `https://api.openai.com/v1` | OpenAI-compatible HTTPS 基地址，程序追加 `/chat/completions`。URL 不得包含用户名、密码、查询参数或片段。 |
-| `OCRS_MODEL` | 空 | 由你选择并获准使用的模型标识；需支持图片和严格 JSON schema 结构输出。 |
+| `OCRS_MODEL_URL` | `https://api.openai.com/v1` | HTTPS 基地址；minimax-cn 未设置时默认 `https://api.minimax.cn/v1`，且只允许此中国端点。程序追加 `/chat/completions`。URL 不得包含用户名、密码、查询参数或片段。 |
+| `OCRS_MODEL` | 空 | 由你选择并获准使用的模型标识；openai-compatible 需支持图片和严格 JSON schema；minimax-cn 仅允许 `MiniMax-M3`，需账户有图片调用权限。 |
 | `OCRS_API_KEY` | 空 | 所选供应商的后端密钥；不要填入审核页的本地访问令牌框。 |
 | `OCRS_INBOX` | 空 | 可选的专用本地收件目录，留空禁用。 |
 | `OCRS_SKUS` | `DEMO-001` | 逗号分隔、区分大小写的已知商品编码，不得为空。 |
@@ -78,16 +78,47 @@ Windows PowerShell 可用 `Copy-Item .env.example .env`（确认原文件不存�
 启用真实模型前需逐项确认：
 
 1. 你有权处理这些截图，授权覆盖发送给具体供应商/服务地址、发送原图的范围和订单识别用途；裁剪掉不必要的聊天与身份信息。
-2. 该服务兼容图片输入及严格 JSON schema 的 Chat Completions 接口，模型标识和 HTTPS 基地址正确。任意“兼容”服务并不保证完全支持这些能力。
+2. 选择适配器对应的图片输入与输出契约，核对模型标识和 HTTPS 基地址。`openai-compatible` 要求严格 JSON schema；`minimax-cn` 的明确差异见下节。任意“兼容”服务不保证完全支持同一契约。
 3. 在供应商账户上设置独立费用/用量限制，使用权限尽可能小的密钥。程序的请求次数上限不是金额上限。
 4. 停止服务，核对待识别队列及收件目录。切换后后台会处理待识别任务；不要让原来只用于演示或未经授权的图片意外外传。
-5. 只在本机 `.env` 或受控后端环境中填写 `OCRS_PROVIDER=openai-compatible`、`OCRS_ALLOW_EXTERNAL=true`、`OCRS_MODEL_URL`、`OCRS_MODEL` 和 `OCRS_API_KEY`，然后重启并先用虚构图片验证。
+5. 只在本机 `.env` 或受控后端环境中填写所选 `OCRS_PROVIDER`、`OCRS_ALLOW_EXTERNAL=true`、`OCRS_MODEL_URL`、`OCRS_MODEL` 和 `OCRS_API_KEY`，然后重启并先用虚构图片验证。
 
 后端发送图片、内部来源 ID、固定识别指令及 schema；密钥只用于该供应商请求认证，不进入模型提示词或前端。不提供模型工具调用，图片里的指令与链接不构成执行权限。
 
 识别请求有输入/输出大小限制、超时、有界退避与重试。供应商适配器默认单次识别最多 3 次 HTTP 尝试，每个服务实例最多 100 次请求尝试（包含重试）；重启实例后计数重置。任务级失败重试也有限制。网络超时可能发生在供应商已经计费之后，因此重试不保证“只计费一次”。认证失败、非法 schema、模型拒答等不应靠无止境重试解决。
 
 当前交付的自动化验证使用替身，不需要真实密钥，也不证明任何供应商的当前准确率、数据保留政策或费用。真实调用须另行在授权和预算范围内验证。
+
+### MiniMax 中国专用配置（0.2.2 起）
+
+密钥只写在仓库根目录本机 `.env` 的 `OCRS_API_KEY`，不要发送到聊天、网页访问令牌框、日志或 Git。`MINIMAX_API_KEY` / `OPENAI_API_KEY` 不会自动映射。已有 `.env` 请编辑而非覆盖；进程环境变量优先于 `.env`。
+
+先保持 `OCRS_ALLOW_EXTERNAL=false`，停止旧服务，在 `.env` 修改对应行（不重复定义）：
+
+```dotenv
+OCRS_DATA_DIR=~/.ocrs-minimax-test
+OCRS_PROVIDER=minimax-cn
+OCRS_ALLOW_EXTERNAL=false
+OCRS_MODEL_URL=https://api.minimax.cn/v1
+OCRS_MODEL=MiniMax-M3
+OCRS_API_KEY=
+OCRS_INBOX=
+OCRS_MAX_REQUESTS=3
+```
+
+- 将密钥在本机填入最后的 `OCRS_API_KEY` 空值。选一个**此前不存在的**专用测试数据目录，避免旧队列和收件目录图片随后台启动外传。
+- 中国专用适配器锁定上述 HTTPS 端点与 `MiniMax-M3`，不接受 M2.x 图片误配、不自动切换其他服务，也不宣称账户已获该模型权限。M3.1 Flash Preview 有独立可用性和 thinking 约束，本版未开放。
+- 官方当前契约支持 Base64 data URL；发送 `detail=default`、`reasoning_split=true`、M3 `thinking.type=disabled` 与有界 `max_completion_tokens`。不发送未获官方确认的 `response_format=json_schema`，而在提示词中给完整 schema 并严格本地验证候选。原 `openai-compatible` 仍保留供应商严格 schema 请求，未降低其契约。
+- 启用前自行确认供应商授权、账户权限和费用预算。然后**由你在本机**改为 `OCRS_ALLOW_EXTERNAL=true`。此值为 false 时真实 provider 会拒绝启动，防止误以为能安全试跑；不是联网开关已通过的状态。
+- 运行 `uv run --locked ocrs init`、`uv run --locked ocrs token`、`uv run --locked ocrs serve`。前两步初始化本地目录/显示本地令牌，`serve` 启动后台；只在新空目录使用。浏览器打开本地页面，填 `ocrs token` 的本地令牌，只上传一张完全虚构的订单图片验证。
+- 首次上传会向 MiniMax 发送该虚构图片并可能产生费用。出现待审核候选只证明这次端到端调用完成；仍须人工核验，不代表生产准确率或自动入账。错误、拒答、截断、非 JSON 和非法候选均不会自动写入正式订单。
+- 完成后停止测试服务；继续处理真实资料前重新确认数据范围与目的地授权。不要把测试目录/demo候选直接当生产数据。
+
+可选预算：`OCRS_MODEL_TIMEOUT_SECONDS` 为 1–60 秒，MiniMax 默认 60、其他默认 15；`OCRS_MODEL_TOTAL_TIMEOUT_SECONDS` 为单次超时至 180 秒，MiniMax 默认 120、其他默认 45；`OCRS_MODEL_MAX_OUTPUT_TOKENS` 为 1–8192，默认 4096；`OCRS_MAX_REQUESTS` 为 1–100000，默认 100。总 deadline 包括重试和读取；网络阻塞仍受 HTTP 分段超时约束，并非精确计费时钟。输出截断时先核对样本规模和预算，不自动放大额度。请求次数重启后重置，不能代替供应商金额限额。
+
+排查：`provider_auth_failed` 检查本机 Key/账户权限；`provider_http_rejected` 或 `provider_api_rejected` 检查模型可用性、配额与参数；`provider_refused` 为安全拒答；`provider_truncated` 为输出上限；`provider_schema_invalid` 为非法结构，不能直接信任正文或跳过校验。只分享脱敏错误码，不分享完整供应商响应。
+
+契约依据（2026-10-10 查阅）：[中国 OpenAI 兼容说明](https://platform.minimax.cn/docs/api-reference/text-openai-api)、[Chat Completions](https://platform.minimax.cn/docs/api-reference/text-chat-openai)、[官方 OpenAPI](https://platform.minimax.cn/docs/api-reference/text/api/openapi-chat-openai.json)。本版本仅有离线 MockTransport 契约与虚构图像流程测试；**未使用真实 API Key、未调用付费模型、未验证用户账户权限或实际识别质量**。
 
 ## 5. 人工审核与 Excel 口径
 

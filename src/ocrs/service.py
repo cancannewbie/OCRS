@@ -17,7 +17,13 @@ from ocrs.capture import validate_image
 from ocrs.config import Settings
 from ocrs.domain import Candidate, CandidateEvent, validate_confirmation
 from ocrs.exporter import ExportError, write_workbook
-from ocrs.providers import DemoProvider, OpenAICompatibleProvider, ProviderError, RecognitionSource
+from ocrs.providers import (
+    DemoProvider,
+    MiniMaxCNProvider,
+    OpenAICompatibleProvider,
+    ProviderError,
+    RecognitionSource,
+)
 from ocrs.storage import connect, encode, transaction
 
 logger = logging.getLogger("ocrs.jobs")
@@ -54,11 +60,16 @@ class Service:
         self.provider = (
             DemoProvider()
             if settings.provider == "demo"
-            else OpenAICompatibleProvider(
+            else (
+                MiniMaxCNProvider if settings.provider == "minimax-cn" else OpenAICompatibleProvider
+            )(
                 base_url=settings.model_url,
                 model=settings.model,
                 api_key=settings.api_key,
                 max_requests=settings.max_requests,
+                timeout_seconds=settings.model_timeout_seconds,
+                total_timeout_seconds=settings.model_total_timeout_seconds,
+                max_output_tokens=settings.model_max_output_tokens,
             )
         )
 
