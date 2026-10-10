@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from filelock import FileLock
 
 from ocrs.storage import (
+    SCHEMA_VERSION,
     EvidenceIntegrityError,
     backup,
     connect,
@@ -62,7 +63,7 @@ def main() -> None:
         if images.is_symlink() or images.is_junction():
             parser.error("备份图片目录不得是符号链接或目录联接")
         with closing(sqlite3.connect(database)) as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+            if db.execute("PRAGMA user_version").fetchone()[0] not in {1, SCHEMA_VERSION}:
                 parser.error("备份数据库版本不受支持")
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 parser.error("备份数据库完整性检查失败")
@@ -83,6 +84,12 @@ def main() -> None:
         migrate(root)
         with transaction(root) as db:
             db.execute("DELETE FROM exports")
+            db.execute(
+                "UPDATE tasks SET model_revision=-1,external_authorized=0,"
+                "status=CASE WHEN status='received' THEN 'failed' ELSE status END,"
+                "error_code=CASE WHEN status='received' THEN 'MODEL_CONFIG_CHANGED' "
+                "ELSE error_code END"
+            )
             db.execute("UPDATE outbox SET status='pending',export_id=NULL,error_code=NULL")
         _create_token(root)
         print("已恢复并重置导出状态。请运行 ocrs token，再启动服务并重建 Excel。")

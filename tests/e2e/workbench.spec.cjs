@@ -296,12 +296,14 @@ test("synthetic evidence becomes a reviewed order and a verified Excel download"
         });
     });
 
-    await test.step("read-only settings are accurate and logout clears the local session", async () => {
+    await test.step("editable settings and diagnostics are accurate and logout clears the local session", async () => {
         await keyboardActivate(page, page.locator("#nav-settings"));
         await expect(page.locator("#settings-view")).toBeVisible();
         await expect(page.locator("#settings-config")).toContainText(/demo/i);
         await expect(page.locator("#settings-config")).toContainText("DEMO-001");
-        await expect(page.locator("#settings-view input:enabled")).toHaveCount(0);
+        await expect(page.locator("#model-provider")).toBeEnabled();
+        await expect(page.locator("#model-api-key")).toHaveValue("");
+        await expect(page.locator("#model-settings-state")).toContainText("Demo");
         await expect(page.locator("body")).not.toContainText(TOKEN);
         await capture(page, testInfo, "10-runtime-settings");
         await keyboardActivate(page, page.locator("#logout-button:visible, #logout-mobile:visible"));

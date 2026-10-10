@@ -42,10 +42,10 @@ def test_configuration_is_explicit_safe_allowlist(tmp_path: Path) -> None:
         assert response.headers["cache-control"] == "no-store"
         assert response.json() == {
             "version": __version__,
-            "schema_version": 1,
+            "schema_version": 2,
             "provider": "demo",
             "recognition_mode": "demo",
-            "model_configured": True,
+            "model_configured": False,
             "external_transmission_enabled": False,
             "inbox_enabled": False,
             "max_upload_bytes": 10 * 1024 * 1024,
@@ -72,9 +72,9 @@ def test_external_configuration_does_not_claim_provider_validation(tmp_path: Pat
     )
     with TestClient(create_app(settings, start_worker=False)) as client:
         config = client.get("/api/config", headers=AUTH).json()
-        assert config["recognition_mode"] == "external"
-        assert config["model_configured"] is True
-        assert config["external_transmission_enabled"] is True
+        assert config["recognition_mode"] == "demo"
+        assert config["model_configured"] is False
+        assert config["external_transmission_enabled"] is False
         assert "verified" not in json.dumps(config)
 
 

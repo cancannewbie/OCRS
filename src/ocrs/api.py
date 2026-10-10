@@ -22,6 +22,13 @@ from ocrs import __version__
 from ocrs.capture import CaptureError, InboxWatcher
 from ocrs.config import Settings
 from ocrs.domain import CURRENCY_MINOR_UNITS
+from ocrs.model_settings import (
+    ModelSettingsConflict,
+    ModelSettingsError,
+    ModelSettingsStore,
+    ModelSettingsUpdate,
+)
+from ocrs.providers import OpenAICompatibleProvider, ProviderError
 from ocrs.security import RequestGuard
 from ocrs.service import AppError, Confirmation, Service
 from ocrs.storage import SCHEMA_VERSION, connect
@@ -36,6 +43,14 @@ class RejectRequest(BaseModel):
 class RetryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int = Field(ge=1)
+    config_revision: int | None = Field(default=None, ge=0)
+    confirm_external: bool = False
+
+
+class ModelTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=0)
+    confirm_external: bool = False
 
 
 def _ingest_inbox(service: Service, data: bytes, label: str) -> tuple[dict[str, Any], bool]:
@@ -47,11 +62,12 @@ def _ingest_inbox(service: Service, data: bytes, label: str) -> tuple[dict[str, 
         if len(label) <= 200
         else "inbox-long-sha256:" + hashlib.sha256(filename.encode()).hexdigest()
     )
-    return service.ingest(data, filename, source_label)
+    return service.ingest(data, filename, source_label, from_inbox=True)
 
 
 def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
-    service = Service(settings)
+    model_store = ModelSettingsStore(settings.data_dir)
+    service = Service(settings, model_store=model_store)
     stop = threading.Event()
     lock = FileLock(str(settings.data_dir / "service.lock"), timeout=0)
     watcher = (
@@ -81,7 +97,7 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
         thread = None
         try:
             with connect(settings.data_dir) as db:
-                if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+                if db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
                     raise RuntimeError("请先运行 ocrs init 完成数据库迁移")
             service.recover()
             if start_worker:
@@ -145,6 +161,21 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
             status_code=exc.status,
         )
 
+    @app.exception_handler(ModelSettingsError)
+    async def model_settings_error(request: Request, exc: ModelSettingsError) -> JSONResponse:
+        conflict = isinstance(exc, ModelSettingsConflict)
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "MODEL_SETTINGS_CONFLICT" if conflict else "MODEL_SETTINGS_INVALID",
+                    "message": "配置已改变，请重新载入"
+                    if conflict
+                    else "配置保存或读取失败，请检查字段和本机安全存储",
+                }
+            },
+            status_code=409 if conflict else 422,
+        )
+
     @app.exception_handler(CaptureError)
     async def capture_error(request: Request, exc: CaptureError) -> JSONResponse:
         return JSONResponse(
@@ -176,15 +207,16 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
 
     @app.get("/api/config", dependencies=auth)
     def configuration() -> dict[str, Any]:
-        # Explicit allowlist: never serialize Settings, credentials, URLs, or local paths.
+        # Explicit allowlist: never serialize credentials or local paths.
+        current = model_store.public()
         return {
             "version": __version__,
             "schema_version": SCHEMA_VERSION,
-            "provider": settings.provider,
-            "recognition_mode": "demo" if settings.provider == "demo" else "external",
-            "model_configured": bool(settings.model and settings.api_key),
+            "provider": current["provider"],
+            "recognition_mode": "demo" if current["provider"] == "demo" else "external",
+            "model_configured": current["status"] == "configured",
             "external_transmission_enabled": (
-                settings.provider != "demo" and settings.allow_external
+                current["provider"] != "demo" and current["allow_external"]
             ),
             "inbox_enabled": settings.inbox is not None,
             "max_upload_bytes": settings.max_upload_bytes,
@@ -195,6 +227,46 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
             "deployment_mode": "single-user-local",
             "backup_mode": "offline-cli",
         }
+
+    @app.get("/api/model-settings", dependencies=auth)
+    def model_configuration() -> dict[str, Any]:
+        return model_store.public()
+
+    @app.put("/api/model-settings", dependencies=auth)
+    def save_model_configuration(body: ModelSettingsUpdate) -> dict[str, Any]:
+        return service.save_model_settings(body)
+
+    @app.post("/api/model-settings/test", dependencies=auth)
+    def test_model_configuration(body: ModelTestRequest) -> dict[str, Any]:
+        # Save/GET never calls the provider; this explicit request uses only an
+        # internally generated synthetic picture, never queued business evidence.
+        with service._model_lock:
+            runtime, revision = service._authorize_model(
+                body.expected_revision, body.confirm_external
+            )
+            if revision != body.expected_revision:
+                raise AppError("MODEL_SETTINGS_CONFLICT", "配置已改变，请重新载入", 409)
+            if runtime.provider == "demo":
+                raise AppError("MODEL_DEMO", "Demo 不执行真实连接测试", 409)
+            provider = service.model_provider(runtime, revision)
+        assert isinstance(provider, OpenAICompatibleProvider)
+        passed = False
+        try:
+            provider.test_connection()
+            passed = True
+        except ProviderError:
+            pass
+        except Exception:
+            # Neither arbitrary transport exception messages nor model bodies
+            # are allowed into HTTP errors, diagnostics or logs.
+            pass
+        result = model_store.record_test(revision, passed).public()
+        result["test_message"] = (
+            "合成图片测试成功；不代表真实订单识别准确率"
+            if passed
+            else "连接或候选结构测试失败；请检查凭据、模型权限和网络后手动重试"
+        )
+        return result
 
     @app.get("/api/tasks", dependencies=auth)
     def tasks(
@@ -216,7 +288,10 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
 
     @app.post("/api/uploads", dependencies=auth)
     def upload(
-        files: Annotated[list[UploadFile], File()], source_label: Annotated[str, Form()] = "manual"
+        files: Annotated[list[UploadFile], File()],
+        source_label: Annotated[str, Form()] = "manual",
+        config_revision: Annotated[int | None, Form(ge=0)] = None,
+        confirm_external: Annotated[bool, Form()] = False,
     ) -> dict[str, Any]:
         if not 1 <= len(files) <= 8:
             raise AppError("UPLOAD_COUNT", "每次上传 1 至 8 张图片")
@@ -234,7 +309,13 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
             validate_image(data, max_bytes=settings.max_upload_bytes)
             staged.append((data, file.filename or "image"))
         for data, filename in staged:
-            task, duplicate = service.ingest(data, filename, source_label)
+            task, duplicate = service.ingest(
+                data,
+                filename,
+                source_label,
+                config_revision=config_revision,
+                confirm_external=confirm_external,
+            )
             results.append(task)
             if duplicate:
                 duplicates.append(task["id"])
@@ -254,7 +335,12 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
 
     @app.post("/api/tasks/{task_id}/retry", dependencies=auth)
     def retry(task_id: str, body: RetryRequest) -> dict[str, Any]:
-        return service.retry(task_id, body.expected_version)
+        return service.retry(
+            task_id,
+            body.expected_version,
+            config_revision=body.config_revision,
+            confirm_external=body.confirm_external,
+        )
 
     @app.post("/api/tasks/{task_id}/reject", dependencies=auth)
     def reject(task_id: str, body: RejectRequest) -> dict[str, Any]:

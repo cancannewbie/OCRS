@@ -6,6 +6,7 @@ import base64
 import json
 import math
 import random
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ import httpx
 from pydantic import ValidationError
 
 from ocrs.domain import Candidate, CandidateEvent, CandidateItem, Evidence
+from ocrs.safe_transport import PublicHTTPTransport, validate_public_host
 
 
 @dataclass(frozen=True)
@@ -183,6 +185,8 @@ class OpenAICompatibleProvider:
             )
             # Accessing .port checks malformed / out-of-range port strings too.
             _ = parsed.port
+            if transport is None and parsed.hostname:
+                validate_public_host(parsed.hostname)
         except ValueError:
             valid_url = False
         if not valid_url:
@@ -296,6 +300,25 @@ class OpenAICompatibleProvider:
         finally:
             self._semaphore.release()
 
+    def test_connection(self) -> None:
+        """Explicit synthetic vision/schema probe; never uses business sources.
+
+        Success means this fixed request returned a locally valid candidate,
+        not that future requests or OCR accuracy are guaranteed.
+        """
+        from PIL import Image, ImageDraw
+
+        with tempfile.TemporaryDirectory(prefix="ocrs-model-test-") as directory:
+            path = Path(directory) / "synthetic.png"
+            image = Image.new("RGB", (320, 96), "white")
+            ImageDraw.Draw(image).text(
+                (8, 8),
+                "SYNTHETIC TEST ONLY\nFictional test buyer\nTEST-001: 1 piece, CNY 1.00",
+                fill="black",
+            )
+            image.save(path, format="PNG")
+            self.recognize([RecognitionSource("synthetic-connection-test", path, "image/png")])
+
     def _prepare_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return payload
 
@@ -352,7 +375,9 @@ class OpenAICompatibleProvider:
         # Per-call clients avoid retaining customer bodies; redirects and ambient
         # proxy configuration are disabled so credentials stay at this endpoint.
         with httpx.Client(
-            transport=self._transport, follow_redirects=False, trust_env=False
+            transport=self._transport if self._transport is not None else PublicHTTPTransport(),
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
             for attempt in range(self._max_attempts):
                 self._reserve_request(deadline)

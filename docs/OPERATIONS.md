@@ -20,38 +20,34 @@ uv run --locked ocrs serve
 - 按 `Ctrl+C` 停止，等待进程完全退出。每个数据目录只运行一个服务进程，不启用 uvicorn 的多 worker 或热重载绕过 CLI。
 - 文件锁保护服务、初始化、备份和证据清理。文件仍在不代表锁仍被持有；不要删除锁文件来强行启动另一个写者。
 
-数据目录中包含 `ocrs.sqlite3`（及 SQLite 自己管理的 WAL 文件）、`images/`、`exports/`、`access-token` 与运行锁文件。不要直接编辑数据库表、图片引用、导出状态或锁文件。不要将此目录放在公共仓库、共享同步盘或未经验证的网络文件系统。
+数据目录中包含 `ocrs.sqlite3`（及 SQLite 自己管理的 WAL 文件）、`images/`、`exports/`、`access-token`、独立的 `model-settings.sqlite3` 与运行锁文件。不要直接编辑数据库表、图片引用、导出状态或锁文件。不要将此目录放在公共仓库、共享同步盘或未经验证的网络文件系统。
 
 本版采用 Python 3.12，CI 包含 Linux/Windows 和 Chromium 离线浏览器验收。是否通过以对应提交的 CI 记录为准；用户实际桌面、输入法、辅助技术与原生 Excel 客户端表现仍需单独演练。
 
-## 2. 环境配置
+## 2. 基础运维配置与升级
 
-CLI 使用 python-dotenv 加载本地 `.env`，已存在的进程环境变量优先；直接导入应用工厂不会替你加载 `.env`。需要自定义时，可复制无秘密示例后在本机编辑：
-
-```sh
-cp .env.example .env
-chmod 600 .env
-```
-
-Windows PowerShell 可用 `Copy-Item .env.example .env`（确认原文件不存在）；环境变量写法为 `$env:OCRS_DATA_DIR = "$HOME\.ocrs"`。上面的 `chmod` 只适用于 Unix；Windows 请用账户/NTFS 权限限制数据目录。启动命令相同。
-
-不要覆盖已有 `.env`，不要提交这个文件。配置改变后停止并重启服务，确认数据目录和模型模式没有意外改变。
+模型配置只在登录后的“模型设置”页面维护，不要求创建或编辑任何模型配置文件。默认路径和 demo 可直接运行。CLI 仍可用 python-dotenv 加载可选的本地 `.env`，已存在的进程环境变量优先；直接导入应用工厂不会加载 `.env`。基础运维配置改变后需停止并重启服务。
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `OCRS_DATA_DIR` | `~/.ocrs` | 数据根目录，可展开 `~`。为不同演练使用独立目录。 |
-| `OCRS_ACCESS_TOKEN` | 空 | 空时读取数据目录内 `access-token`；设置时覆盖该文件，至少 32 字符。只使用私有随机值。 |
-| `OCRS_PROVIDER` | `demo` | `demo`、`openai-compatible` 或 `minimax-cn`；默认虚构结果，不执行 OCR。 |
-| `OCRS_ALLOW_EXTERNAL` | `false` | 只有显式 `true` 才允许启用真实模型；这不代替客户数据处理授权。 |
-| `OCRS_MODEL_URL` | `https://api.openai.com/v1` | HTTPS 基地址；minimax-cn 未设置时默认 `https://api.minimax.cn/v1`，且只允许此中国端点。程序追加 `/chat/completions`。URL 不得包含用户名、密码、查询参数或片段。 |
-| `OCRS_MODEL` | 空 | 由你选择并获准使用的模型标识；openai-compatible 需支持图片和严格 JSON schema；minimax-cn 仅允许 `MiniMax-M3`，需账户有图片调用权限。 |
-| `OCRS_API_KEY` | 空 | 所选供应商的后端密钥；不要填入审核页的本地访问令牌框。 |
-| `OCRS_INBOX` | 空 | 可选的专用本地收件目录，留空禁用。 |
-| `OCRS_SKUS` | `DEMO-001` | 逗号分隔、区分大小写的已知商品编码，不得为空。 |
+| `OCRS_DATA_DIR` | `~/.ocrs` | 本地数据根目录，可展开 `~`。 |
+| `OCRS_ACCESS_TOKEN` | 空 | 空时使用数据目录的 `access-token`；覆盖值须为至少 32 字符的私有随机令牌。 |
+| `OCRS_INBOX` | 空 | 可选的本人受控图片收件目录，留空禁用。 |
+| `OCRS_SKUS` | `DEMO-001` | 非空、逗号分隔、区分大小写的已知商品编码。 |
 
-`OCRS_SKUS` 只是编码白名单，不是商品主数据管理系统，也不提供价格或单位的自动校验。更换商品目录前先检查待审核任务。
+如需修改基础配置，可参考仓库中的 `.env.example`，不要覆盖已有文件或提交秘密。POSIX 可对本机 `.env` 使用 `chmod 600`；Windows 使用账户/NTFS 权限限制访问。PowerShell 环境变量示例：`$env:OCRS_DATA_DIR = "$HOME\.ocrs"`。
 
-访问令牌泄漏时，先停止服务并限制数据目录访问。如果一直使用令牌文件，可在私有终端生成新的至少 32 字符随机令牌并替换该文件，恢复仅本人可读写权限后重启；如果配置了 `OCRS_ACCESS_TOKEN`，须替换实际生效的环境配置。原图、订单和已下载导出是否泄漏需另行判断，换令牌不能撤回已复制的数据。
+`OCRS_SKUS` 是编码白名单，不提供价格或单位自动校验。更换前先检查待审核任务。访问令牌泄漏时停止服务，替换实际生效的令牌文件或 `OCRS_ACCESS_TOKEN`，恢复受限权限后重启；换令牌不能撤回已复制的数据。
+
+### 从 0.2.2 或更早版本升级
+
+1. 停止旧服务，先按第 6 节用旧版本备份业务资料，并确认备份完成。
+2. 更新代码并执行 `uv sync --locked --python 3.12`，再执行 `uv run --locked ocrs init`。显式迁移业务 schema 1 → 2，为任务增加模型配置版本及外传授权绑定；没有自动降级。
+3. 运行 `uv run --locked ocrs token`、`uv run --locked ocrs serve`，登录后进入“模型设置”。首次为 demo，外部调用默认关闭。
+4. 需要真实模型时在页面重新填写、保存并按第 4 节测试；旧待识别队列不会获得新的外传授权。核对每个待重试任务后再操作。
+5. 自行从旧 `.env`、启动脚本或进程环境中安全移除过时模型密钥。程序不会替你删除这些旧秘密。
+
+`Settings.from_env` **忽略全部旧模型变量**：`OCRS_PROVIDER`、`OCRS_MODEL`、`OCRS_MODEL_URL`、`OCRS_API_KEY`、`OCRS_ALLOW_EXTERNAL`、`OCRS_MODEL_TIMEOUT_SECONDS`、`OCRS_MODEL_TOTAL_TIMEOUT_SECONDS`、`OCRS_MODEL_MAX_OUTPUT_TOKENS`、`OCRS_MAX_REQUESTS`。它们既不自动导入，也不覆盖已保存的新设置。`MINIMAX_API_KEY` / `OPENAI_API_KEY` 同样不自动映射。不要再通过这些变量启用真实模型。
 
 ## 3. 导入图片与受控收件目录
 
@@ -69,56 +65,48 @@ Windows PowerShell 可用 `Copy-Item .env.example .env`（确认原文件不存�
 
 服务后台反复扫描目录，仅处理直接子级中的支持图片；不递归，不跟随图片符号链接。文件连续两次观察稳定并校验通过后才导入；每图来源标签为 `inbox:文件名`。改名会改变去重范围，不能把改名当作安全的重试方式。单轮扫描有数量上限，较大目录可能需要多轮。
 
-扫描与识别在同一后台循环中，空闲时约一秒轮询；模型请求较慢会延迟下一轮，不能把它当成实时文件系统监听。原始收件文件不会移动或删除，清理 OCRS 证据也不会清理收件目录；请单独执行相应保留策略。建议先写临时文件，再在同目录重命名为最终图片名。
+扫描与识别在同一后台循环中，空闲时约一秒轮询；模型请求较慢会延迟下一轮，不能把它当成实时文件系统监听。真实模型模式下，收件目录仅导入图片，任务需在页面手动重试并确认当前目的地和外传；不自动调用外部模型。原始收件文件不会移动或删除，清理 OCRS 证据也不会清理收件目录；请单独执行相应保留策略。建议先写临时文件，再在同目录重命名为最终图片名。
 
-## 4. 从 demo 切换真实模型
+## 4. 页面模型设置与真实调用
 
-**demo 不检查像素，不生成可信 OCR 结果。** 它只产生含 `DEMO_SYNTHETIC` 和虚构客户/商品的候选，验证上传、人工确认、存储和导出流程。
+**demo 不检查像素，不生成可信 OCR 结果。** 它产生带 `DEMO_SYNTHETIC` 标记的虚构候选，仅验证流程。
 
-启用真实模型前需逐项确认：
+### 配置、保存与测试
 
-1. 你有权处理这些截图，授权覆盖发送给具体供应商/服务地址、发送原图的范围和订单识别用途；裁剪掉不必要的聊天与身份信息。
-2. 选择适配器对应的图片输入与输出契约，核对模型标识和 HTTPS 基地址。`openai-compatible` 要求严格 JSON schema；`minimax-cn` 的明确差异见下节。任意“兼容”服务不保证完全支持同一契约。
-3. 在供应商账户上设置独立费用/用量限制，使用权限尽可能小的密钥。程序的请求次数上限不是金额上限。
-4. 停止服务，核对待识别队列及收件目录。切换后后台会处理待识别任务；不要让原来只用于演示或未经授权的图片意外外传。
-5. 只在本机 `.env` 或受控后端环境中填写所选 `OCRS_PROVIDER`、`OCRS_ALLOW_EXTERNAL=true`、`OCRS_MODEL_URL`、`OCRS_MODEL` 和 `OCRS_API_KEY`，然后重启并先用虚构图片验证。
+1. 在本地页面登录，进入“本机配置”中的“模型设置”。选择 `demo`、`minimax-cn` 或 `openai-compatible`。
+2. MiniMax 中国站锁定 `https://api.minimax.cn/v1` 与 `MiniMax-M3`。OpenAI 兼容接口填写获授权的 HTTPS 基地址和支持图片、严格 JSON schema 的模型；名称“兼容”不保证实际具备这些能力。
+3. API 密钥只在页面密码框写入后端，读取接口仅报告“已配置/未配置”，不回显秘密。选择“保留”时输入留空；更换密钥须明确选择“替换”，清除须选择“删除”。改变供应商或目的地不能沿用旧密钥，须重新指定该目的地的密钥。
+4. 外部调用开关默认关闭。确认具体服务地址、数据处理授权、账户模型权限及预算后才开启。点击保存将设置持久化，立即用于后续任务，无需重启；**保存、打开页面、开启开关本身不发起模型调用**。
+5. 明确点击“测试已保存配置”，核对目的地及费用说明后确认。只发送系统生成的虚构 PNG、固定识别指令与 schema，不取用真实截图、历史候选或订单。测试可能产生费用；成功仅证明该配置版本的一次合成请求通过，不代表真实识别准确率或供应商数据政策已获验证。
+6. 手动上传或重试真实图片前，再确认当前配置版本、目的地、本次图片范围及可能费用。页面配置被别处修改后需重新读取并确认，旧确认不能授权新目的地。
 
-后端发送图片、内部来源 ID、固定识别指令及 schema；密钥只用于该供应商请求认证，不进入模型提示词或前端。不提供模型工具调用，图片里的指令与链接不构成执行权限。
+供应商密钥不用于本地访问令牌登录，不写入浏览器持久存储、日志、异常或模型提示词。后端正常识别发送图片、内部来源 ID、固定指令与 schema。图片和返回内容均不可信，不提供模型工具调用，也不允许模型直接写正式订单。先裁剪不必要的聊天与身份信息，所有候选仍需人工审核。
 
-识别请求有输入/输出大小限制、超时、有界退避与重试。供应商适配器默认单次识别最多 3 次 HTTP 尝试，每个服务实例最多 100 次请求尝试（包含重试）；重启实例后计数重置。任务级失败重试也有限制。网络超时可能发生在供应商已经计费之后，因此重试不保证“只计费一次”。认证失败、非法 schema、模型拒答等不应靠无止境重试解决。
+### 配置版本、队列与请求预算
 
-当前交付的自动化验证使用替身，不需要真实密钥，也不证明任何供应商的当前准确率、数据保留政策或费用。真实调用须另行在授权和预算范围内验证。
+每次保存使用预期配置版本进行并发校验，任务绑定版本和外传授权。配置变化后的旧待处理任务暂停为可见失败（`MODEL_CONFIG_CHANGED`）；不会把旧队列悄悄发送给新服务。收件目录导入不自动授权外传。核对后在页面手动重试，仍需当前任务版本与当前模型配置版本。已开始的请求可以按原不可变快照完成，保存设置或关闭开关不保证中断已发送的请求；新配置用于后续任务。
 
-### MiniMax 中国专用配置（0.2.2 起）
+在模型设置展开“请求超时与预算上限”可编辑以下字段，页面与 API 均按范围校验：单次超时 `timeout_seconds` 为 1–60 秒（默认 15），总超时 `total_timeout_seconds` 为单次超时至 180 秒（默认 45），输出上限 `max_output_tokens` 为 1–8192（默认 4096），请求次数 `max_requests` 为 1–100000（默认 100）。旧环境变量不改变这些值。请求次数包含重试，不是金额预算；重启或配置变化后不能把计数当作持久化账户限额。请同时在供应商账户设置费用/用量限制。
 
-密钥只写在仓库根目录本机 `.env` 的 `OCRS_API_KEY`，不要发送到聊天、网页访问令牌框、日志或 Git。`MINIMAX_API_KEY` / `OPENAI_API_KEY` 不会自动映射。已有 `.env` 请编辑而非覆盖；进程环境变量优先于 `.env`。
+供应商识别最多 3 次 HTTP 尝试，任务级重试也有上限。超时可能发生在已经计费之后，重试不能保证只计费一次。总时长受有界 deadline 和 HTTP 分段超时约束，不是精确计费时钟。认证失败、拒答、非法 schema 与截断需定位原因，不无限重试或自动放大预算。
 
-先保持 `OCRS_ALLOW_EXTERNAL=false`，停止旧服务，在 `.env` 修改对应行（不重复定义）：
+### 端点与网络边界
 
-```dotenv
-OCRS_DATA_DIR=~/.ocrs-minimax-test
-OCRS_PROVIDER=minimax-cn
-OCRS_ALLOW_EXTERNAL=false
-OCRS_MODEL_URL=https://api.minimax.cn/v1
-OCRS_MODEL=MiniMax-M3
-OCRS_API_KEY=
-OCRS_INBOX=
-OCRS_MAX_REQUESTS=3
-```
+仅支持公网 HTTPS、443 端口；基地址不能含用户名、密码、查询参数或片段。每次连接校验 DNS 返回的所有地址并固定实际连接到已验证的公网 IP，TLS 仍使用原始主机名进行 SNI 与证书校验；禁止重定向与环境代理，拒绝私网、回环、链路本地和元数据端点，降低 SSRF 与 DNS 重绑定风险。本版不支持 localhost 模型、私网网关或依赖环境代理的服务，不能通过关闭证书校验绕过。
 
-- 将密钥在本机填入最后的 `OCRS_API_KEY` 空值。选一个**此前不存在的**专用测试数据目录，避免旧队列和收件目录图片随后台启动外传。
-- 中国专用适配器锁定上述 HTTPS 端点与 `MiniMax-M3`，不接受 M2.x 图片误配、不自动切换其他服务，也不宣称账户已获该模型权限。M3.1 Flash Preview 有独立可用性和 thinking 约束，本版未开放。
-- 官方当前契约支持 Base64 data URL；发送 `detail=default`、`reasoning_split=true`、M3 `thinking.type=disabled` 与有界 `max_completion_tokens`。不发送未获官方确认的 `response_format=json_schema`，而在提示词中给完整 schema 并严格本地验证候选。原 `openai-compatible` 仍保留供应商严格 schema 请求，未降低其契约。
-- 启用前自行确认供应商授权、账户权限和费用预算。然后**由你在本机**改为 `OCRS_ALLOW_EXTERNAL=true`。此值为 false 时真实 provider 会拒绝启动，防止误以为能安全试跑；不是联网开关已通过的状态。
-- 运行 `uv run --locked ocrs init`、`uv run --locked ocrs token`、`uv run --locked ocrs serve`。前两步初始化本地目录/显示本地令牌，`serve` 启动后台；只在新空目录使用。浏览器打开本地页面，填 `ocrs token` 的本地令牌，只上传一张完全虚构的订单图片验证。
-- 首次上传会向 MiniMax 发送该虚构图片并可能产生费用。出现待审核候选只证明这次端到端调用完成；仍须人工核验，不代表生产准确率或自动入账。错误、拒答、截断、非 JSON 和非法候选均不会自动写入正式订单。
-- 完成后停止测试服务；继续处理真实资料前重新确认数据范围与目的地授权。不要把测试目录/demo候选直接当生产数据。
+### 密钥存储和恢复边界
 
-可选预算：`OCRS_MODEL_TIMEOUT_SECONDS` 为 1–60 秒，MiniMax 默认 60、其他默认 15；`OCRS_MODEL_TOTAL_TIMEOUT_SECONDS` 为单次超时至 180 秒，MiniMax 默认 120、其他默认 45；`OCRS_MODEL_MAX_OUTPUT_TOKENS` 为 1–8192，默认 4096；`OCRS_MAX_REQUESTS` 为 1–100000，默认 100。总 deadline 包括重试和读取；网络阻塞仍受 HTTP 分段超时约束，并非精确计费时钟。输出截断时先核对样本规模和预算，不自动放大额度。请求次数重启后重置，不能代替供应商金额限额。
+API 密钥以 AES-256-GCM 加密保存在数据目录的独立 `model-settings.sqlite3`；其余模型设置是非秘密元数据，不宣称整份数据库都加密。主密钥位于数据目录之外的 `~/.ocrs-model-keys`，按规范化数据根路径的哈希标识绑定。POSIX 主密钥目录权限为 0700、密钥文件与模型存储为 0600；Windows 主密钥由当前账户的 DPAPI 保护，失败不降级为明文。
 
-排查：`provider_auth_failed` 检查本机 Key/账户权限；`provider_http_rejected` 或 `provider_api_rejected` 检查模型可用性、配额与参数；`provider_refused` 为安全拒答；`provider_truncated` 为输出上限；`provider_schema_invalid` 为非法结构，不能直接信任正文或跳过校验。只分享脱敏错误码，不分享完整供应商响应。
+这防护模型库或内置业务备份意外泄露，不抵御同一操作系统账户、管理员、恶意程序或进程内存读取。内置 `ocrs backup` 排除模型存储及主密钥；手工复制整机、目录或第三方备份不自动获得同样的排除保证。恢复业务到新目录后重新在页面配置；只复制密文到新路径不能保证解密。若主密钥丢失或账户变化导致凭据不可用，页面显示“已保存密钥无法解密”，仍可查看原配置字段，但不能保留不可用密钥；选择“替换为新密钥”或“删除已保存密钥”后重新保存。页面不会回显旧秘密。不要为方便把主密钥与业务备份放在一起。
 
-契约依据（2026-10-10 查阅）：[中国 OpenAI 兼容说明](https://platform.minimax.cn/docs/api-reference/text-openai-api)、[Chat Completions](https://platform.minimax.cn/docs/api-reference/text-chat-openai)、[官方 OpenAPI](https://platform.minimax.cn/docs/api-reference/text/api/openapi-chat-openai.json)。本版本仅有离线 MockTransport 契约与虚构图像流程测试；**未使用真实 API Key、未调用付费模型、未验证用户账户权限或实际识别质量**。
+### MiniMax 中国契约与排查
+
+`minimax-cn` 保留中国站专用图像契约：Base64 data URL、`detail=default`、`reasoning_split=true`、M3 `thinking.type=disabled` 与有界 `max_completion_tokens`。通过提示词提供完整 schema 并严格本地校验，不宣称供应商强制 `response_format=json_schema`。OpenAI 兼容适配器仍要求供应商严格 schema。M2.x 不用于图片，本版未开放 M3.1 Preview，也不自动切换服务。
+
+`provider_auth_failed` 检查 Key/账户权限；`provider_http_rejected` 或 `provider_api_rejected` 检查能力、配额和参数；`provider_refused` 表示拒答；`provider_truncated` 表示输出截断；`provider_schema_invalid` 表示非法结构。只分享脱敏错误码，不分享供应商原始响应。
+
+契约参考：[中国 OpenAI 兼容说明](https://platform.minimax.cn/docs/api-reference/text-openai-api)、[Chat Completions](https://platform.minimax.cn/docs/api-reference/text-chat-openai)、[官方 OpenAPI](https://platform.minimax.cn/docs/api-reference/text/api/openapi-chat-openai.json)。本版本自动化仅用离线替身与虚构图片，**未使用真实 API Key，未验证用户账户权限、实际费用或识别质量**。
 
 ## 5. 人工审核与 Excel 口径
 
@@ -144,7 +132,7 @@ BACKUP_DIR="$HOME/ocrs-backups/$(date -u +%Y%m%dT%H%M%SZ)"
 uv run --locked ocrs backup "$BACKUP_DIR"
 ```
 
-CLI 获取同一服务锁，使用 SQLite backup API 备份数据库，仅复制仍被未过期证据引用的图片，并在复制前后校验 SHA-256 摘要。缺失或被修改的原图会使备份失败；已过期或无记录关联的文件不带入新备份。备份包含订单、候选、事件和待导出状态；**不包含访问令牌、环境密钥、生成的 Excel、收件目录或手工编辑副本**。这些排除项按其各自用途管理，秘密不要为了方便直接放进业务备份。
+CLI 获取同一服务锁，使用 SQLite backup API 备份数据库，仅复制仍被未过期证据引用的图片，并在复制前后校验 SHA-256 摘要。缺失或被修改的原图会使备份失败；已过期或无记录关联的文件不带入新备份。备份包含订单、候选、事件和待导出状态；**不包含访问令牌、模型设置存储（含加密 API 密钥）、加密主密钥、环境密钥、生成的 Excel、收件目录或手工编辑副本**。这些排除项按其各自用途管理，秘密不要为了方便直接放进业务备份。
 
 备份可能含全部客户信息且不自动加密。只保存在获授权、访问受控的介质上，按计划演练恢复并清理过期副本。若备份命令失败，不要把残留目录当作完整备份；检查原因后选择新的空目标重试，保留并核对原数据。
 
@@ -155,8 +143,6 @@ CLI 获取同一服务锁，使用 SQLite backup API 备份数据库，仅复制
 ```sh
 export OCRS_DATA_DIR="$HOME/.ocrs-restored"
 export OCRS_ACCESS_TOKEN=""
-export OCRS_PROVIDER=demo
-export OCRS_ALLOW_EXTERNAL=false
 export OCRS_INBOX=""
 uv run --locked ocrs restore "$BACKUP_DIR"
 uv run --locked ocrs token
@@ -173,9 +159,9 @@ uv run --locked ocrs serve
 4. 重新生成并核对 Excel；不要将旧快照当作当前数据库状态。
 5. 恢复点之后已经在系统外处理的订单或导出需人工对账，避免重复履约。备份之后新增的业务不可能凭恢复自动找回。
 
-演练成功后再决定是否切换正式数据目录和真实模型，重新核对队列、预算与授权。`demo` 恢复演练会处理未完成的识别任务并产生虚构候选，因此演练副本不能不经核对就作为真实业务继续运行。若要保留恢复时的未完成任务用于真实处理，应在启动前明确设置正确供应商及授权。
+恢复目录不继承原模型设置和密钥，默认 demo、外部调用关闭。演练副本不能不经核对就作为真实业务继续运行；保留正式处理的任务应在页面重新配置后，逐个核对并显式重试。旧版本队列和新的模型配置版本不匹配时暂停，不自动继承旧外传授权。不要复制加密模型库到新目录来代替重新配置。
 
-本版数据库 schema 为版本 1，通过 `PRAGMA user_version` 追踪；`ocrs init` 是明确迁移入口。遇到比当前程序更新的 schema 时停止使用旧程序。升级前先备份、在新目录演练，再执行迁移；当前没有自动降级命令，不手工改版本号来绕过检查。
+本版业务数据库 schema 为版本 2（从版本 1 显式迁移），通过 `PRAGMA user_version` 追踪；`ocrs init` 是明确迁移入口。遇到比当前程序更新的 schema 时停止使用旧程序。升级前先备份、在新目录演练，再执行迁移；当前没有自动降级命令，不手工改版本号来绕过检查。
 
 ## 8. 证据保留与删除
 
@@ -200,7 +186,7 @@ uv run --locked ocrs purge-evidence --days 30 --confirm
 - 文件锁失败：停止占用该数据目录的服务或维护命令，等待退出。不要删锁文件或绕过 CLI。
 - 图片没有导入：核对格式、10 MiB/2,000 万像素限制、文件是否稳定、目录是否可读、是否使用符号链接。先用网页手动导入虚构样本定位问题。
 - 识别失败：按安全错误码核对服务配置、供应商能力、配额和网络；解决原因后在界面重试。只对失败任务重试，不反复新建相同业务。
-- 识别中的进程崩溃：重启后恢复逻辑处理未完成任务。可能重新请求模型，不能据此承诺不会重复产生供应商费用；正式确认仍受事务与幂等约束。
+- 识别中的进程崩溃：重启后恢复逻辑处理未完成任务。中断的识别进入可见失败，须手动核对后重试并确认当前外传；重试可能再次计费；正式确认仍受事务与幂等约束。
 - 确认提示未知 SKU/缺失字段：核对截图、商品目录和必填值，不编造数据绕过校验。
 - 版本或幂等冲突：刷新并比较已经发生的变更；不要更换请求键盲目再次入账。
 - 导出失败或进程中断：正式订单仍在数据库。重启后检查状态并重新生成快照，核对版本与数量，处理孤立旧文件前先确认它们不再需要。

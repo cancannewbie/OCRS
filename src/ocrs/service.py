@@ -5,8 +5,10 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,11 +19,13 @@ from ocrs.capture import validate_image
 from ocrs.config import Settings
 from ocrs.domain import Candidate, CandidateEvent, validate_confirmation
 from ocrs.exporter import ExportError, write_workbook
+from ocrs.model_settings import ModelSettingsStore, ModelSettingsUpdate
 from ocrs.providers import (
     DemoProvider,
     MiniMaxCNProvider,
     OpenAICompatibleProvider,
     ProviderError,
+    RecognitionProvider,
     RecognitionSource,
 )
 from ocrs.storage import connect, encode, transaction
@@ -54,24 +58,73 @@ class Confirmation(BaseModel):
 
 
 class Service:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, model_store: ModelSettingsStore | None = None):
         self.settings = settings
         self.root = settings.data_dir
-        self.provider = (
-            DemoProvider()
-            if settings.provider == "demo"
-            else (
-                MiniMaxCNProvider if settings.provider == "minimax-cn" else OpenAICompatibleProvider
-            )(
-                base_url=settings.model_url,
-                model=settings.model,
-                api_key=settings.api_key,
-                max_requests=settings.max_requests,
-                timeout_seconds=settings.model_timeout_seconds,
-                total_timeout_seconds=settings.model_total_timeout_seconds,
-                max_output_tokens=settings.model_max_output_tokens,
-            )
+        self.model_store = model_store
+        self._model_lock = threading.RLock()
+        self._provider_revision = -1
+        self.provider: RecognitionProvider = (
+            self._make_provider(settings) if model_store is None else DemoProvider()
         )
+
+    @staticmethod
+    def _make_provider(settings: Settings) -> RecognitionProvider:
+        if settings.provider == "demo":
+            return DemoProvider()
+        return (
+            MiniMaxCNProvider if settings.provider == "minimax-cn" else OpenAICompatibleProvider
+        )(
+            base_url=settings.model_url,
+            model=settings.model,
+            api_key=settings.api_key,
+            max_requests=settings.max_requests,
+            timeout_seconds=settings.model_timeout_seconds,
+            total_timeout_seconds=settings.model_total_timeout_seconds,
+            max_output_tokens=settings.model_max_output_tokens,
+        )
+
+    def runtime_settings(self) -> tuple[Settings, int]:
+        if self.model_store is None:
+            return self.settings, 0
+        snapshot = self.model_store.snapshot()
+        return replace(
+            self.settings,
+            provider=snapshot.provider,
+            model=snapshot.model,
+            model_url=snapshot.base_url,
+            api_key=snapshot.api_key,
+            allow_external=snapshot.allow_external,
+            max_requests=snapshot.max_requests,
+            model_timeout_seconds=snapshot.timeout_seconds,
+            model_total_timeout_seconds=snapshot.total_timeout_seconds,
+            model_max_output_tokens=snapshot.max_output_tokens,
+        ), snapshot.revision
+
+    def save_model_settings(self, body: ModelSettingsUpdate) -> dict[str, Any]:
+        assert self.model_store is not None
+        with self._model_lock:
+            saved = self.model_store.save(body)
+            # Revision binding is the fail-closed guard even if this independent
+            # business-DB transaction fails after settings were committed.
+            with transaction(self.root) as db:
+                db.execute(
+                    "UPDATE tasks SET status='failed',error_code='MODEL_CONFIG_CHANGED',"
+                    "version=version+1,updated_at=? WHERE status='received' AND model_revision!=?",
+                    (now(), saved.revision),
+                )
+            return saved.public()
+
+    def _authorize_model(
+        self, config_revision: int | None, confirm_external: bool
+    ) -> tuple[Settings, int]:
+        settings, revision = self.runtime_settings()
+        if self.model_store and settings.provider != "demo":
+            if not settings.allow_external or not settings.api_key or not settings.model:
+                raise AppError("MODEL_DISABLED", "请先在模型设置保存完整配置并允许外部调用", 409)
+            if not confirm_external or config_revision != revision:
+                raise AppError("MODEL_CONSENT_REQUIRED", "请确认当前模型目的地及本次图片外传", 409)
+        return settings, revision
 
     def recover(self) -> None:
         with transaction(self.root) as db:
@@ -97,7 +150,32 @@ class Service:
                 if generated and f"images/{path.name}" not in retained and not path.is_dir():
                     path.unlink(missing_ok=True)
 
-    def ingest(self, data: bytes, filename: str, source_label: str) -> tuple[dict[str, Any], bool]:
+    def ingest(
+        self,
+        data: bytes,
+        filename: str,
+        source_label: str,
+        *,
+        config_revision: int | None = None,
+        confirm_external: bool = False,
+        from_inbox: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        with self._model_lock:
+            if from_inbox:
+                runtime, revision = self.runtime_settings()
+            else:
+                runtime, revision = self._authorize_model(config_revision, confirm_external)
+            return self._ingest(data, filename, source_label, runtime, revision, confirm_external)
+
+    def _ingest(
+        self,
+        data: bytes,
+        filename: str,
+        source_label: str,
+        runtime: Settings,
+        revision: int,
+        confirm_external: bool,
+    ) -> tuple[dict[str, Any], bool]:
         if not source_label.strip() or len(source_label) > 200 or len(filename) > 255:
             raise AppError("SOURCE_INVALID", "来源标签或文件名无效")
         image = validate_image(data, max_bytes=self.settings.max_upload_bytes)
@@ -148,10 +226,19 @@ class Service:
                 db.execute(
                     (
                         "INSERT INTO "
-                        "tasks(id,source_id,status,provider,created_at,updated_at) "
-                        "VALUES(?,?,'received',?,?,?)"
+                        "tasks(id,source_id,status,provider,created_at,updated_at,"
+                        "model_revision,external_authorized) "
+                        "VALUES(?,?,'received',?,?,?,?,?)"
                     ),
-                    (task_id, source_id, self.settings.provider, stamp, stamp),
+                    (
+                        task_id,
+                        source_id,
+                        runtime.provider,
+                        stamp,
+                        stamp,
+                        revision,
+                        int(confirm_external),
+                    ),
                 )
                 return self._task(db, task_id), False
         except BaseException:
@@ -264,6 +351,68 @@ class Service:
         return result
 
     def process_one(self) -> bool:
+        with self._model_lock:
+            runtime, revision = self.runtime_settings()
+            claimed = self._claim_task(runtime, revision)
+            if claimed is None:
+                return False
+            row, provider = claimed
+        task_id = row["id"]
+        started = time.monotonic()
+        try:
+            if self.model_store:
+                if row["model_revision"] != revision:
+                    raise AppError("MODEL_CONFIG_CHANGED", "模型配置已改变，请确认后重新识别")
+                if runtime.provider != "demo" and (
+                    not runtime.allow_external
+                    or not runtime.api_key
+                    or not runtime.model
+                    or not row["external_authorized"]
+                ):
+                    raise AppError("MODEL_CONSENT_REQUIRED", "本任务尚未确认外传")
+            if row["expired"]:
+                raise AppError("EVIDENCE_EXPIRED", "原图已过期")
+            image_path = self.root / row["path"]
+            if hashlib.sha256(image_path.read_bytes()).hexdigest() != row["digest"]:
+                raise AppError("EVIDENCE_CHANGED", "原图摘要已变更")
+            candidate = provider.recognize(
+                [RecognitionSource(id=row["source_id"], path=image_path, mime=row["mime"])]
+            )
+            self._validate_evidence(candidate, {row["source_id"]})
+            payload = candidate.model_dump_json()
+            with transaction(self.root) as db:
+                db.execute(
+                    "INSERT INTO candidate_history(task_id,attempt,candidate,created_at,"
+                    "model,prompt_version,input_digest) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        task_id,
+                        row["attempts"] + 1,
+                        payload,
+                        now(),
+                        runtime.model or "demo",
+                        getattr(provider, "prompt_version", "unknown"),
+                        row["digest"],
+                    ),
+                )
+                db.execute(
+                    "UPDATE tasks SET status='review_required',candidate=?,error_code=NULL,"
+                    "version=version+1,updated_at=?,duration_ms=? "
+                    "WHERE id=? AND status='recognizing'",
+                    (payload, now(), round((time.monotonic() - started) * 1000), task_id),
+                )
+            self._log(task_id, "review_required", None, started, row["attempts"] + 1)
+        except (ProviderError, AppError) as exc:
+            self._fail_task(task_id, exc.code, started, row["attempts"] + 1)
+        except Exception:
+            self._fail_task(task_id, "RECOGNITION_INTERNAL", started, row["attempts"] + 1)
+        return True
+
+    def _claim_task(
+        self, runtime: Settings, revision: int
+    ) -> tuple[sqlite3.Row, RecognitionProvider] | None:
+        # Validate/build before claiming: a damaged configuration must never
+        # strand a task in recognizing or partially mix a key and destination.
+        provider = self.model_provider(runtime, revision)
         with transaction(self.root) as db:
             row = db.execute(
                 "SELECT t.*,s.path,s.mime,s.expired,s.digest FROM tasks t JOIN sources s "
@@ -271,7 +420,7 @@ class Service:
                 "t.created_at LIMIT 1"
             ).fetchone()
             if not row:
-                return False
+                return None
             task_id = row["id"]
             db.execute(
                 (
@@ -279,57 +428,25 @@ class Service:
                     "status='recognizing',attempts=attempts+1,version=version+1,u"
                     "pdated_at=?,provider=? WHERE id=?"
                 ),
-                (now(), self.settings.provider, task_id),
+                (now(), runtime.provider, task_id),
             )
-        started = time.monotonic()
-        try:
-            if row["expired"]:
-                raise AppError("EVIDENCE_EXPIRED", "原图已过期")
-            image_path = self.root / row["path"]
-            if hashlib.sha256(image_path.read_bytes()).hexdigest() != row["digest"]:
-                raise AppError("EVIDENCE_CHANGED", "原图摘要已变更")
-            candidate = self.provider.recognize(
-                [
-                    RecognitionSource(
-                        id=row["source_id"], path=self.root / row["path"], mime=row["mime"]
-                    )
-                ]
-            )
-            self._validate_evidence(candidate, {row["source_id"]})
-            payload = candidate.model_dump_json()
-            with transaction(self.root) as db:
-                db.execute(
-                    (
-                        "INSERT INTO "
-                        "candidate_history(task_id,attempt,candidate,created_at,"
-                        "model,prompt_version,input_digest) VALUES(?,?,?,?,?,?,?)"
-                    ),
-                    (
-                        task_id,
-                        row["attempts"] + 1,
-                        payload,
-                        now(),
-                        self.settings.model or "demo",
-                        getattr(self.provider, "prompt_version", "unknown"),
-                        row["digest"],
-                    ),
-                )
-                db.execute(
-                    (
-                        "UPDATE tasks SET "
-                        "status='review_required',candidate=?,error_code=NULL,version"
-                        "=version+1,updated_at=?,duration_ms=? WHERE id=? AND status="
-                        "'recognizing'"
-                    ),
-                    (payload, now(), round((time.monotonic() - started) * 1000), task_id),
-                )
-            self._log(task_id, "review_required", None, started, row["attempts"] + 1)
-        except (ProviderError, AppError) as exc:
-            self._fail_task(task_id, exc.code, started, row["attempts"] + 1)
-        except Exception:
-            # Adapter boundary: persist safe code, never third-party text or customer evidence.
-            self._fail_task(task_id, "RECOGNITION_INTERNAL", started, row["attempts"] + 1)
-        return True
+        return row, provider
+
+    def model_provider(self, runtime: Settings, revision: int) -> RecognitionProvider:
+        if self.model_store and self._provider_revision != revision:
+            if runtime.provider == "demo" or (
+                runtime.api_key and runtime.model and runtime.allow_external
+            ):
+                try:
+                    self.provider = self._make_provider(runtime)
+                except ProviderError:
+                    raise AppError(
+                        "MODEL_CONFIG_INVALID", "模型配置无效，请重新保存设置", 409
+                    ) from None
+            else:
+                self.provider = DemoProvider()  # Gated before any recognition.
+            self._provider_revision = revision
+        return self.provider
 
     @staticmethod
     def _validate_evidence(candidate: Candidate, source_ids: set[str]) -> None:
@@ -364,7 +481,21 @@ class Service:
             )
         )
 
-    def retry(self, task_id: str, expected_version: int | None = None) -> dict[str, Any]:
+    def retry(
+        self,
+        task_id: str,
+        expected_version: int | None = None,
+        *,
+        config_revision: int | None = None,
+        confirm_external: bool = False,
+    ) -> dict[str, Any]:
+        with self._model_lock:
+            _, revision = self._authorize_model(config_revision, confirm_external)
+            return self._retry(task_id, expected_version, revision, confirm_external)
+
+    def _retry(
+        self, task_id: str, expected_version: int | None, revision: int, confirm_external: bool
+    ) -> dict[str, Any]:
         with transaction(self.root) as db:
             task = self._task(db, task_id)
             if expected_version is not None and task["version"] != expected_version:
@@ -380,9 +511,10 @@ class Service:
             db.execute(
                 (
                     "UPDATE tasks SET "
-                    "status='received',error_code=NULL,version=version+1,updated_at=? WHERE id=?"
+                    "status='received',error_code=NULL,version=version+1,updated_at=?,"
+                    "model_revision=?,external_authorized=? WHERE id=?"
                 ),
-                (now(), task_id),
+                (now(), revision, int(confirm_external), task_id),
             )
             return self._task(db, task_id)
 
@@ -698,7 +830,9 @@ class Service:
                 json.loads(export["metadata"]) if export["metadata"] else None
             )
         return {
-            "provider": self.settings.provider,
+            "provider": self.model_store.public()["provider"]
+            if self.model_store
+            else self.settings.provider,
             "counts": counts,
             "export": export_status,
             "pending_export_events": pending,

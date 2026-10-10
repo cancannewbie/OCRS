@@ -48,6 +48,9 @@
         image_too_many_pixels: "图片像素过多，请缩小分辨率后重试。",
         image_animated: "不支持动态图，请上传静态截图。",
         RETRY_EXHAUSTED: "已达到识别重试上限，请检查运行配置。",
+        MODEL_SETTINGS_CONFLICT: "模型配置已被其他页面更新。请重新读取后核对；当前输入暂留此页面。",
+        MODEL_SETTINGS_INVALID: "模型设置不合法，请核对地址、模型和密钥操作。",
+        MODEL_TEST_FAILED: "模型测试未成功，请检查模型、密钥和服务地址后再试。",
         PROVIDER_NOT_CONFIGURED: "真实模型尚未配置，请检查本机配置。",
         TRANSMISSION_NOT_ALLOWED: "尚未明确允许向外部模型发送资料。",
     };
@@ -77,6 +80,9 @@
         searchTimer: null,
         config: null,
         configLoading: false,
+        modelSettings: null,
+        modelSettingsDirty: false,
+        modelSettingsLoading: false,
         confirmTarget: null,
         zoom: 100,
         dialogFocus: new Map(),
@@ -289,7 +295,7 @@
     }
 
     function hasUnsavedWork() {
-        return Array.from(state.drafts.values()).some((draft) => draft.dirty);
+        return state.modelSettingsDirty || Array.from(state.drafts.values()).some((draft) => draft.dirty);
     }
 
     function manualLogout() {
@@ -314,6 +320,17 @@
         state.status = null;
         state.config = null;
         state.configLoading = false;
+        state.modelSettings = null;
+        state.modelSettingsDirty = false;
+        state.modelSettingsLoading = false;
+        byId("model-settings-form").reset();
+        byId("model-api-key").value = "";
+        byId("model-settings-result").textContent = "";
+        byId("model-settings-error").hidden = true;
+        byId("model-test-destination").textContent = "";
+        byId("model-test-error").hidden = true;
+        byId("model-test-confirm").disabled = false;
+        byId("model-test-cancel").disabled = false;
         state.selectedId = null;
         state.taskCache.clear();
         state.taskPage = { total: 0, limit: 50, offset: 0, has_more: false };
@@ -1636,9 +1653,11 @@
         state.operations.add(`task:${task.id}`);
         setTaskBusy(task.id, true);
         try {
+            const consent = await authorizeRecognition("这条任务的原始截图");
+            if (consent === null || epoch !== state.epoch) return;
             await request(`/api/tasks/${encodeURIComponent(task.id)}/retry`, {
                 method: "POST",
-                body: { expected_version: task.version },
+                body: { expected_version: task.version, ...consent },
             });
             if (epoch !== state.epoch) return;
             state.drafts.delete(task.id);
@@ -1656,6 +1675,7 @@
     }
 
     function openUpload() {
+        if (state.view === "settings" && !discardModelChanges()) return;
         byId("upload-error").hidden = true;
         openDialog("upload-dialog", "upload-files");
     }
@@ -1701,6 +1721,9 @@
         ])
             byId(id).disabled = true;
         try {
+            const consent = await authorizeRecognition(`本次选定的 ${files.length} 张完整截图及来源标签`);
+            if (consent === null || epoch !== state.epoch) return;
+            for (const [key, value] of Object.entries(consent)) body.append(key, String(value));
             const result = await request("/api/uploads", {
                 method: "POST",
                 body,
@@ -1745,6 +1768,7 @@
     function switchView(view) {
         const titles = { dashboard: "工作台", review: "审核队列", orders: "正式订单", exports: "导出中心", settings: "运行配置" };
         if (!Object.hasOwn(titles, view)) return;
+        if (state.view === "settings" && view !== "settings" && !discardModelChanges()) return;
         state.view = view;
         for (const name of Object.keys(titles)) {
             byId(`${name}-view`).hidden = view !== name;
@@ -1754,7 +1778,7 @@
         }
         byId("page-title").textContent = titles[view];
         document.title = `${titles[view]} · OCRS`;
-        if (view === "settings") void loadConfig();
+        if (view === "settings") { void loadConfig(); void loadModelSettings(); }
         if (view === "dashboard") renderDashboard();
     }
 
@@ -1953,6 +1977,183 @@
         }
     }
 
+    function modelBusy() {
+        return state.operations.has("model-settings") || state.modelSettingsLoading;
+    }
+
+    function updateModelControls() {
+        const saved = state.modelSettings;
+        const provider = byId("model-provider").value;
+        const demo = provider === "demo";
+        const minimax = provider === "minimax-cn";
+        if (minimax) {
+            byId("model-name").value = "MiniMax-M3";
+            byId("model-base-url").value = "https://api.minimax.cn/v1";
+        }
+        const changedDestination = saved && (saved.provider !== provider || saved.base_url !== byId("model-base-url").value.trim());
+        const keep = byId("model-key-action").querySelector('[value="keep"]');
+        keep.disabled = Boolean(!demo && saved?.api_key_configured && (changedDestination || saved.credential_status === "unavailable"));
+        if (keep.disabled && byId("model-key-action").value === "keep") byId("model-key-action").value = "replace";
+        byId("model-name").disabled = demo || minimax;
+        byId("model-base-url").disabled = demo || minimax;
+        byId("model-name").required = !demo;
+        byId("model-base-url").required = !demo;
+        byId("model-key-action").disabled = demo;
+        const replacement = !demo && byId("model-key-action").value === "replace";
+        byId("model-api-key").disabled = !replacement;
+        byId("model-api-key").required = replacement;
+        byId("model-allow-external").disabled = demo;
+        if (demo) byId("model-allow-external").checked = false;
+        byId("model-key-status").textContent = saved?.credential_status === "unavailable" ? "已保存密钥无法解密。请替换新密钥或明确删除后保存；原配置字段仍可查看。"
+            : changedDestination && saved?.api_key_configured && !demo
+            ? "目的地已改变，不能复用原密钥。请提供新密钥，或选择删除后保存为未配置。"
+            : saved?.api_key_configured ? "后端已保存密钥；不会显示原值。保留时请留空，删除必须明确选择。" : "后端尚未保存密钥。";
+        byId("model-capability-warning").textContent = demo ? "Demo 不执行 OCR，只返回虚构候选。切换到 Demo 并保存会删除已保存密钥并关闭外部调用。"
+            : minimax ? "中国站固定使用 MiniMax-M3。文本模型连通不等于图片 OCR 能力；请核对供应商当前模型能力。"
+                : "请填写支持图像输入和本系统结构输出的模型。兼容接口或文本测试通过不等于 OCR 可用。仅支持安全 HTTPS 公网地址。";
+        byId("model-settings-fields").disabled = !saved || modelBusy();
+        byId("model-save").disabled = !saved || modelBusy();
+        byId("model-reset").disabled = modelBusy();
+        byId("model-test").disabled = !saved || modelBusy() || state.modelSettingsDirty || saved.status !== "configured" || !saved.allow_external;
+    }
+
+    function renderModelSettings() {
+        const saved = state.modelSettings;
+        if (!saved) return;
+        byId("model-provider").value = saved.provider;
+        byId("model-name").value = saved.model || "";
+        byId("model-base-url").value = saved.base_url || "";
+        byId("model-key-action").value = "keep";
+        byId("model-api-key").value = "";
+        byId("model-allow-external").checked = saved.allow_external === true;
+        for (const [id, key, fallback] of [["model-timeout", "timeout_seconds", 15], ["model-total-timeout", "total_timeout_seconds", 45], ["model-max-tokens", "max_output_tokens", 4096], ["model-max-requests", "max_requests", 100]]) byId(id).value = saved[key] ?? fallback;
+        state.modelSettingsDirty = false;
+        const labels = { demo: "Demo · 不执行 OCR", not_configured: "尚未配置完整", configured: "已配置 · 未验证识别" };
+        byId("model-settings-state").textContent = labels[saved.status] || "配置状态未知";
+        byId("model-settings-result").textContent = saved.test_status === "passed" ? "测试成功：仅验证本次虚构请求，不代表真实 OCR 准确率。"
+            : saved.test_status === "failed" ? "上次测试失败；请检查配置后手动重试。" : "尚未测试。保存配置不会调用外部模型。";
+        updateModelControls();
+    }
+
+    function discardModelChanges() {
+        if (modelBusy()) { notice("模型配置操作正在进行，请等待完成。", "warning"); return false; }
+        if (state.modelSettingsDirty && !window.confirm("模型配置尚未保存。离开将清除这些修改和新输入的密钥，继续吗？")) return false;
+        if (state.modelSettingsDirty) renderModelSettings();
+        return true;
+    }
+
+    async function loadModelSettings(force = false) {
+        if (!state.token || modelBusy()) return;
+        if (state.modelSettings && !force) return;
+        // A failed refresh must retain edits; only replace the form after success.
+        if (force && state.modelSettingsDirty && !window.confirm("重新读取将放弃未保存的模型配置和新密钥，继续吗？")) return;
+        const epoch = state.epoch;
+        state.modelSettingsLoading = true;
+        updateModelControls();
+        byId("model-settings-error").hidden = true;
+        try {
+            const saved = await request("/api/model-settings");
+            if (epoch !== state.epoch) return;
+            state.modelSettings = saved;
+            renderModelSettings();
+        } catch (error) {
+            if (epoch !== state.epoch) return;
+            reportError(error, byId("model-settings-error"));
+            byId("model-settings-error").focus();
+        } finally {
+            if (epoch === state.epoch) { state.modelSettingsLoading = false; updateModelControls(); }
+        }
+    }
+
+    async function saveModelSettings(event) {
+        event.preventDefault();
+        if (!state.modelSettings || modelBusy()) return;
+        if (!byId("model-settings-form").reportValidity()) return;
+        const provider = byId("model-provider").value;
+        const body = {
+            expected_revision: state.modelSettings.revision,
+            provider,
+            model: provider === "demo" ? "" : byId("model-name").value.trim(),
+            base_url: provider === "demo" ? "" : byId("model-base-url").value.trim(),
+            allow_external: provider !== "demo" && byId("model-allow-external").checked,
+            api_key_action: provider === "demo" ? "delete" : byId("model-key-action").value,
+            timeout_seconds: Number(byId("model-timeout").value),
+            total_timeout_seconds: Number(byId("model-total-timeout").value),
+            max_output_tokens: Number(byId("model-max-tokens").value),
+            max_requests: Number(byId("model-max-requests").value),
+        };
+        if (body.api_key_action === "replace") body.api_key = byId("model-api-key").value;
+        const epoch = state.epoch;
+        state.operations.add("model-settings");
+        updateModelControls();
+        byId("model-settings-error").hidden = true;
+        try {
+            const saved = await request("/api/model-settings", { method: "PUT", body });
+            if (epoch !== state.epoch) return;
+            state.modelSettings = saved;
+            renderModelSettings();
+            notice("模型配置已保存到本机；未发起外部调用。");
+            state.config = null;
+            void loadConfig(true);
+            void refresh(true);
+        } catch (error) {
+            if (epoch !== state.epoch) return;
+            reportError(error, byId("model-settings-error"));
+            byId("model-settings-error").focus();
+        } finally {
+            delete body.api_key;
+            if (epoch === state.epoch) { state.operations.delete("model-settings"); updateModelControls(); }
+        }
+    }
+
+    function openModelTest() {
+        if (byId("model-test").disabled) return;
+        const saved = state.modelSettings;
+        byId("model-test-destination").textContent = `目的地：${saved.base_url} · 模型：${saved.model} · 配置版本：${saved.revision}`;
+        byId("model-test-error").hidden = true;
+        openDialog("model-test-dialog", "model-test-cancel");
+    }
+
+    async function testModelSettings() {
+        if (modelBusy() || state.modelSettingsDirty || !byId("model-test-dialog").open) return;
+        const epoch = state.epoch;
+        state.operations.add("model-settings");
+        updateModelControls();
+        byId("model-test-confirm").disabled = true;
+        byId("model-test-cancel").disabled = true;
+        byId("model-test-error").hidden = true;
+        try {
+            const saved = await request("/api/model-settings/test", { method: "POST", body: { expected_revision: state.modelSettings.revision, confirm_external: true } });
+            if (epoch !== state.epoch) return;
+            state.modelSettings = saved;
+            renderModelSettings();
+            closeDialog("model-test-dialog");
+        } catch (error) {
+            if (epoch !== state.epoch) return;
+            byId("model-settings-result").textContent = "测试未成功。配置已保留，请检查后手动重试。";
+            reportError(error, byId("model-test-error"));
+            byId("model-test-error").focus();
+        } finally {
+            if (epoch === state.epoch) {
+                state.operations.delete("model-settings");
+                byId("model-test-confirm").disabled = false;
+                byId("model-test-cancel").disabled = false;
+                updateModelControls();
+            }
+        }
+    }
+
+    async function authorizeRecognition(scope) {
+        const saved = await request("/api/model-settings");
+        if (saved.provider === "demo") return {};
+        if (saved.status !== "configured") throw makeError("PROVIDER_NOT_CONFIGURED");
+        if (!saved.allow_external) throw makeError("TRANSMISSION_NOT_ALLOWED");
+        // Native confirmation names the exact saved destination and data scope.
+        // The server binds the consent to this revision and rejects a stale one.
+        if (!window.confirm(`将${scope}发送至 ${saved.base_url}，使用模型 ${saved.model} 识别订单。可能产生费用。确认您有权外传这些资料并继续？`)) return null;
+        return { config_revision: saved.revision, confirm_external: true };
+    }
+
     function configPanel(title, rows, note) {
         const panel = element("section", "panel");
         const heading = element("div", "panel-heading");
@@ -1998,7 +2199,7 @@
             ["配置摘要版本", config.schema_version],
             ["部署模式", config.deployment_mode === "single-user-local" ? "单人 / 单机 / 单写者" : "未知"],
             ["备份恢复", config.backup_mode === "offline-cli" ? "停机后通过本机命令执行" : "未知"],
-        ], "本页不显示密钥、完整服务地址或数据路径，也不修改配置。运维步骤见项目 docs/OPERATIONS.md。"));
+        ], "以上运维摘要不显示密钥或数据路径。模型设置可在上方编辑；备份恢复仍需停机执行。"));
     }
 
     async function openOrderHistory(order) {
@@ -2042,10 +2243,22 @@
         const token = byId("access-token").value.trim();
         if (token) void login(token);
     });
+    byId("model-settings-form").addEventListener("submit", saveModelSettings);
+    for (const name of ["input", "change"]) byId("model-settings-fields").addEventListener(name, (event) => {
+        if (modelBusy() || !state.modelSettings) return;
+        state.modelSettingsDirty = true;
+        byId("model-settings-result").textContent = "有未保存修改；请先保存再测试。";
+        if (event.target.id === "model-provider" || event.target.id === "model-key-action") byId("model-api-key").value = "";
+        updateModelControls();
+    });
+    byId("model-reset").addEventListener("click", () => loadModelSettings(true));
+    byId("model-test").addEventListener("click", openModelTest);
+    byId("model-test-cancel").addEventListener("click", () => closeDialog("model-test-dialog"));
+    byId("model-test-confirm").addEventListener("click", testModelSettings);
     byId("logout-button").addEventListener("click", manualLogout);
     byId("logout-mobile").addEventListener("click", manualLogout);
     byId("refresh-button").addEventListener("click", () => {
-        if (state.view === "settings") void loadConfig(true);
+        if (state.view === "settings") { void loadConfig(true); void loadModelSettings(true); }
         void refresh();
         const task = selectedTask();
         if (task && state.reviewDetail) void renderSources(task);
@@ -2115,7 +2328,7 @@
     for (const dialog of document.querySelectorAll("dialog")) {
         dialog.addEventListener("cancel", (event) => {
             const taskId = dialog.id === "reject-dialog" ? state.rejectTarget?.id : dialog.id === "duplicate-dialog" ? state.duplicate?.taskId : state.confirmTarget?.taskId;
-            if ((dialog.id === "upload-dialog" && state.operations.has("upload")) || (taskId && state.operations.has(`task:${taskId}`))) event.preventDefault();
+            if ((dialog.id === "model-test-dialog" && modelBusy()) || (dialog.id === "upload-dialog" && state.operations.has("upload")) || (taskId && state.operations.has(`task:${taskId}`))) event.preventDefault();
         });
         dialog.addEventListener("close", () => {
             // Native close events are queued and can arrive after the dialog reopens.
@@ -2148,7 +2361,7 @@
     });
     document.addEventListener("visibilitychange", () => { if (!document.hidden && state.token) void refresh(true); });
     window.addEventListener("beforeunload", (event) => {
-        if (hasUnsavedWork() || state.operations.has("upload") || Array.from(state.operations).some((key) => key.startsWith("task:"))) {
+        if (hasUnsavedWork() || state.operations.has("model-settings") || state.operations.has("upload") || Array.from(state.operations).some((key) => key.startsWith("task:"))) {
             event.preventDefault(); event.returnValue = "";
         }
     });
