@@ -377,7 +377,13 @@ def test_minimax_failures_never_persist_candidates_or_formal_orders(
     service = minimax_service(tmp_path)
     body, code = bad_envelope(case)
     service.provider = backend(lambda _: httpx.Response(200, json=body))
-    task, _ = service.ingest(synthetic_image(), "fictional.png", "fictional-minimax-source")
+    task, _ = service.ingest(
+        synthetic_image(),
+        "fictional.png",
+        "fictional-minimax-source",
+        config_revision=0,
+        confirm_external=True,
+    )
     assert service.process_one()
     failed = service.task(task["id"])
     assert failed["status"] == "failed"
@@ -404,7 +410,13 @@ def test_minimax_success_remains_unconfirmed_and_records_provider_metadata(tmp_p
         return httpx.Response(200, json=envelope(candidate_payload(source_id)))
 
     service.provider = backend(handler)
-    task, _ = service.ingest(synthetic_image(), "fictional.png", "fictional-minimax-source")
+    task, _ = service.ingest(
+        synthetic_image(),
+        "fictional.png",
+        "fictional-minimax-source",
+        config_revision=0,
+        confirm_external=True,
+    )
     assert service.process_one()
     reviewed = service.task(task["id"])
     assert reviewed["status"] == "review_required"

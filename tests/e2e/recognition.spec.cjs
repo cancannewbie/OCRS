@@ -50,7 +50,7 @@ async function submit(page, enable = false) {
         if (enable) expect(dialog.message()).toMatch(/开启.*外部.*调用/);
         await dialog.accept();
     });
-    const response = page.waitForResponse((r) => r.url().endsWith("/api/uploads") && r.request().method() === "POST");
+    const response = page.waitForResponse((r) => r.url().endsWith("/api/recognitions") && r.request().method() === "POST");
     await page.locator("#upload-submit").click();
     const uploaded = await response;
     expect(uploaded.ok()).toBeTruthy();
@@ -106,7 +106,7 @@ test("configured image flow enables external in place, reviews evidence and expo
     await captureSynthetic(page, testInfo, "configured-image-upload");
     const writes = [];
     page.on("request", (r) => {
-        if (r.method() === "POST" && /\/api\/(uploads|model-settings\/enable-external)$/.test(new URL(r.url()).pathname)) writes.push(r);
+        if (r.method() === "POST" && /\/api\/(recognitions|model-settings\/enable-external)$/.test(new URL(r.url()).pathname)) writes.push(r);
     });
     // Cancellation must neither persist permission nor submit the selected image.
     page.once("dialog", (dialog) => dialog.dismiss());
@@ -116,14 +116,19 @@ test("configured image flow enables external in place, reviews evidence and expo
     expect((await settings(request)).allow_external).toBe(false);
     expect(await page.locator("#upload-files").evaluate((node) => node.files.length)).toBe(1);
     const uploaded = await submit(page, true);
-    expect(uploaded.tasks).toHaveLength(1);
-    const id = uploaded.tasks[0].id;
-    expect(writes.map((r) => new URL(r.url()).pathname)).toEqual([`${API}/enable-external`, "/api/uploads"]);
+    expect(uploaded.status).toMatch(/received|recognizing|succeeded/);
+    const id = uploaded.task_id;
+    expect(writes.map((r) => new URL(r.url()).pathname)).toEqual([`${API}/enable-external`, "/api/recognitions"]);
     const enabled = await settings(request);
     expect(enabled.allow_external).toBe(true);
     expect(enabled.revision).toBeGreaterThan(disabled.revision);
     expect(writes[0].postDataJSON()).toMatchObject({ expected_revision: disabled.revision, confirm_external: true });
     expect(writes[1].postData()).toMatch(new RegExp(`name="config_revision"\\r\\n\\r\\n${enabled.revision}\\r\\n`));
+    await expect(page.locator("#results-view")).toBeVisible();
+    await expect(page.locator("#result-detail")).toContainText("SYNTHETIC Vision Buyer");
+    await captureSynthetic(page, testInfo, "configured-image-raw-result");
+    expect(await orderCount(request)).toBe(before);
+    await page.locator("#result-review").click();
     await expect(page.locator("#task-status")).toHaveText("待审核");
     await expect(page.locator("#editor-content").getByLabel(/^客户/)).toHaveValue("SYNTHETIC Vision Buyer");
     await expect(page.locator("#editor-content")).not.toContainText("DEMO_SYNTHETIC");
@@ -141,8 +146,10 @@ test("configured image flow enables external in place, reviews evidence and expo
     await page.locator("#nav-dashboard").click();
     await prepare(page, image, label);
     const repeated = await submit(page);
-    expect(repeated.duplicates).toHaveLength(1);
-    expect(repeated.tasks[0].id).toBe(id);
+    expect(repeated.duplicate).toBe(true);
+    expect(repeated.task_id).toBe(id);
+    await expect(page.locator("#result-detail")).toContainText("SYNTHETIC Vision Buyer");
+    await page.locator("#result-review").click();
     await expect(page.locator("#task-status")).toHaveText("待审核");
     const customer = `SYNTHETIC reviewed ${label}`;
     const externalId = `000042-${randomUUID()}`;
@@ -188,7 +195,9 @@ for (const [model, code] of [
         await configure(page, model);
         await prepare(page, image, `synthetic-failure-${randomUUID()}`);
         const result = await submit(page, true);
-        const id = result.tasks[0].id;
+        const id = result.task_id;
+        await expect(page.locator("#result-detail")).toContainText(code);
+        await page.locator("#result-review").click();
         await expect(page.locator("#task-status")).toHaveText("识别失败");
         await expect(page.locator("#editor-content")).toContainText(code);
         await expect(page.locator("#review-form")).not.toBeVisible();

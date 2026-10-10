@@ -376,7 +376,7 @@ def test_migration_preserves_old_model_candidate_and_rejection(
     assert detail["review_history"][0]["task_version"] is None
     assert detail["candidate_revisions"] == []
     with connect(tmp_path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -430,7 +430,7 @@ def test_restore_older_backup_migrates_without_losing_rejected_model_candidate(
     assert detail["candidate"] == detail["model_candidate"] == candidate
     assert detail["review_history"][0]["reason"] == "Fictional old rejection"
     with connect(restored) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 

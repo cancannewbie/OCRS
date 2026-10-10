@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ocrs"
-version = "0.2.6"
-description = "Local screenshot order collection and review"
+version = "0.3.0"
+description = "Local screenshot recognition with optional order review and export"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi>=0.115,<1",

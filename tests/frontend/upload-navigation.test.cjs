@@ -111,9 +111,9 @@ test("navigation exposes one section at a time and queue search combines with st
     const beta = makeTask({ id: "task-2", status: "failed", candidate: { schema_version: "1", events: [makeEvent({ customer: "Synthetic Customer Beta" })], warnings: [], missing_reasons: [] }, sources: [{ id: "source-beta", filename: "synthetic-beta.png", source_label: "synthetic-beta-source", url: "/api/sources/source-beta" }] });
     const app = setup(t, { tasks: [makeTask(), beta] });
     await app.login();
-    for (const view of ["dashboard", "review", "orders", "exports", "settings"]) {
+    for (const view of ["dashboard", "results", "api", "review", "orders", "exports", "settings"]) {
         await app.click(`nav-${view}`);
-        for (const other of ["dashboard", "review", "orders", "exports", "settings"])
+        for (const other of ["dashboard", "results", "api", "review", "orders", "exports", "settings"])
             assert.equal(app.id(`${other}-view`).hidden, view !== other);
         assert.equal(app.id(`nav-${view}`).getAttribute("aria-current"), "page");
     }
@@ -589,11 +589,11 @@ test("external upload cancel sends nothing and acceptance binds destination cons
     await app.click("open-upload"); app.files();
     const prompts = []; app.window.confirm = (message) => { prompts.push(message); return false; };
     await app.submit("upload-form");
-    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.calls("/api/recognitions").length, 0);
     assert.match(prompts[0], /models.example.com.*synthetic-vision-model/);
     assert.match(prompts[0], /1 张完整截图/);
     app.window.confirm = () => true; await app.submit("upload-form");
-    const body = app.calls("/api/uploads")[0].options.body;
+    const body = app.calls("/api/recognitions")[0].options.body;
     assert.equal(body.get("config_revision"), "1");
     assert.equal(body.get("confirm_external"), "true");
 });
@@ -652,7 +652,7 @@ test("disabled external calls can be explicitly enabled with this batch, without
     app.window.confirm = (message) => { prompts.push(message); return false; };
     await app.submit("upload-form");
     assert.equal(app.calls("/api/model-settings/enable-external").length, 0);
-    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.calls("/api/recognitions").length, 0);
     assert.equal(app.id("upload-files").files[0], files[0]);
     assert.match(prompts[0], /开启此外部模型调用.*1 张完整截图.*models.example.com.*synthetic-vision-model/);
     assert.match(prompts[0], /费用.*其他图片仍须另行确认.*旧队列/);
@@ -660,7 +660,7 @@ test("disabled external calls can be explicitly enabled with this batch, without
     await app.submit("upload-form");
     assert.equal(prompts.length, 2, "only one confirmation per attempt");
     assert.deepEqual(JSON.parse(app.calls("/api/model-settings/enable-external")[0].options.body), { expected_revision: 1, confirm_external: true });
-    const body = app.calls("/api/uploads")[0].options.body;
+    const body = app.calls("/api/recognitions")[0].options.body;
     assert.equal(body.get("config_revision"), "2");
     assert.equal(body.get("confirm_external"), "true");
     assert.equal(body.get("source_label"), "synthetic-current-batch");
@@ -673,7 +673,7 @@ test("a changed destination during in-place enable sends no image and retains dr
     await app.click("open-upload"); const files = app.files();
     app.on("/api/model-settings/enable-external", () => json({ error: { code: "MODEL_SETTINGS_CONFLICT" } }, 409));
     await app.submit("upload-form");
-    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.calls("/api/recognitions").length, 0);
     assert.equal(app.id("upload-files").files[0], files[0]);
     assert.match(app.id("upload-error").textContent, /配置已被其他页面更新/);
     assert.equal(app.id("upload-submit").disabled, false);
@@ -687,7 +687,7 @@ test("late enable reply cannot upload files in a new login session", async (t) =
     app.dispatch(app.id("upload-form"), "submit"); await flush();
     await app.click("logout-button"); await app.login();
     pending.resolve(json({ ...app.server.modelSettings, allow_external: true, revision: 2 })); await flush();
-    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.calls("/api/recognitions").length, 0);
     assert.equal(app.id("model-api-key").value, "");
 });
 
@@ -698,7 +698,7 @@ test("incomplete external configuration does not ask or enable and preserves sel
     await app.click("open-upload"); const files = app.files(); await app.submit("upload-form");
     assert.equal(prompts, 0);
     assert.equal(app.calls("/api/model-settings/enable-external").length, 0);
-    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.calls("/api/recognitions").length, 0);
     assert.equal(app.id("upload-files").files[0], files[0]);
     assert.match(app.id("upload-error").textContent, /模型设置.*已选图片会保留/);
 });
@@ -723,4 +723,191 @@ test("regenerating Excel locks old ready download even across status refresh and
     assert.equal(app.id("download-button").disabled, false);
     await app.click("download-button");
     assert.equal(app.calls("/api/export/download").length, 1);
+});
+
+
+test("primary navigation emphasizes recognition and hides retired source scanning", async (t) => {
+    const app = setup(t); await app.login();
+    assert.deepEqual(Array.from(app.document.querySelectorAll(".nav-tab")).slice(0, 3).map(node => node.textContent.trim()), ["上传识别", "识别结果", "API 接入"]);
+    assert.equal(app.id("inbox-banner").hidden, true);
+    assert.match(app.id("inbox-note").textContent, /已停用/);
+    await app.click("open-upload");
+    assert.match(app.id("upload-mode-note").textContent, /离线演示.*不执行 OCR/);
+    assert.match(app.id("upload-submit").textContent, /运行离线演示/);
+});
+
+test("raw results retain unknown SKU, null, evidence and model values independently of optional corrections", async (t) => {
+    const attack = '<img src=x onerror="window.syntheticAttack=true">';
+    const original = { schema_version: "1", events: [makeEvent({ customer: attack, occurred_at: null, items: [{ sku: "SYNTHETIC-UNKNOWN", name: null, quantity: null, unit: null, unit_price: "0.10", line_id: null }] })], warnings: ["Synthetic uncertain"], missing_reasons: ["Synthetic quantity is unknown"] };
+    const task = makeTask({ provider: "openai-compatible", model_candidate: original, candidate: { ...original, events: [makeEvent({ customer: "Synthetic corrected customer" })] } });
+    const app = setup(t, { tasks: [task] }); await app.login(); await app.click("nav-results");
+    app.document.querySelector(".recognition-task").click(); await flush();
+    assert.match(app.id("result-detail").textContent, /SYNTHETIC-UNKNOWN/);
+    assert.match(app.id("result-detail").textContent, /未知.*null/);
+    assert.match(app.id("result-detail").textContent, /Synthetic quantity is unknown/);
+    assert.match(app.id("result-detail").textContent, /未经人工核实/);
+    assert.match(app.id("result-detail").textContent, /原文证据/);
+    assert.match(app.id("result-detail").textContent, /0.10/);
+    assert.match(app.id("result-detail").textContent, /<img src=x/);
+    assert.equal(app.id("result-detail").querySelector("[onerror]"), null);
+    assert.match(app.id("result-detail").querySelector("img").src, /^blob:/);
+    assert.equal(app.window.syntheticAttack, undefined);
+    assert.doesNotMatch(app.id("result-detail").textContent, /Synthetic corrected customer/);
+    assert.equal(app.requests.filter(request => request.method !== "GET").length, 0);
+    await app.click("result-review");
+    assert.equal(app.field("客户").value, "Synthetic corrected customer");
+});
+
+test("result polling preserves expanded JSON and input focus when the result is unchanged", async (t) => {
+    const app = setup(t); await app.login(); await app.click("nav-results");
+    app.document.querySelector(".recognition-task").click(); await flush();
+    const details = app.id("result-detail").querySelector("details");
+    details.open = true;
+    app.id("results-search").focus();
+    await app.runTimers(4000);
+    assert.equal(app.id("result-detail").querySelector("details"), details);
+    assert.equal(details.open, true);
+    assert.equal(app.document.activeElement, app.id("results-search"));
+});
+
+test("unfinished and failed recognitions remain visible without loading result or silently falling back", async (t) => {
+    const failed = makeTask({ id: "task-failed", status: "failed", candidate: null, error_code: "provider_timeout", provider: "openai-compatible" });
+    const app = setup(t, { tasks: [makeTask({ status: "recognizing", candidate: null }), failed] });
+    await app.login(); await app.click("nav-results");
+    app.document.querySelector('[data-result-task-id="task-1"]').click(); await flush();
+    assert.match(app.id("result-detail").textContent, /尚未就绪/);
+    app.document.querySelector('[data-result-task-id="task-failed"]').click(); await flush();
+    assert.match(app.id("result-detail").textContent, /provider_timeout/);
+    assert.match(app.id("result-detail").textContent, /手动重试/);
+    assert.equal(app.requests.some(request => request.path.endsWith("/result")), false);
+    assert.equal(app.requests.filter(request => request.method !== "GET").length, 0);
+});
+
+test("old-session recognition result bodies cannot restore protected result text", async (t) => {
+    const app = setup(t); await app.login(); await app.click("nav-results");
+    const late = deferred();
+    app.on("/api/recognitions/task-1/result", () => ({ ok: true, status: 200, json: () => late.promise }));
+    app.document.querySelector(".recognition-task").click(); await flush();
+    await app.click("logout-button"); await app.login();
+    late.resolve({ status: "succeeded", recognition_mode: "external", result: { events: [makeEvent({ customer: "SYNTHETIC STALE PRIVATE RESULT" })] } });
+    await flush();
+    assert.doesNotMatch(app.id("result-detail").textContent, /STALE PRIVATE/);
+    assert.equal(app.id("results-view").hidden, true);
+});
+
+test("formal multi-image upload sends single-file bodies and preserves per-file retry keys after partial acceptance", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app); await app.submit("model-settings-form");
+    await app.click("open-upload");
+    app.files(["synthetic-first.png", "synthetic-second.png"]);
+    app.fill(app.id("source-label"), "synthetic-partial-batch");
+    let attempt = 0;
+    app.on("/api/recognitions", () => {
+        attempt += 1;
+        return attempt === 2 ? json({ error: { code: "QUEUE_FULL" } }, 429)
+            : json({ task_id: "task-1", status: "received", duplicate: attempt > 2 }, 202);
+    }, { once: false });
+    await app.submit("upload-form");
+    assert.equal(app.id("upload-dialog").open, true);
+    assert.match(app.id("upload-error").textContent, /已接收 1 张/);
+    const firstAttempts = app.calls("/api/recognitions");
+    assert.equal(firstAttempts.length, 2);
+    for (const call of firstAttempts) {
+        assert.equal(call.options.body.getAll("file").length, 1);
+        assert.equal(call.options.body.has("files"), false);
+        assert.equal(call.options.body.get("confirm_external"), "true");
+    }
+    const keys = firstAttempts.map(call => call.options.body.get("idempotency_key"));
+    assert.notEqual(keys[0], keys[1]);
+    await app.submit("upload-form");
+    const retry = app.calls("/api/recognitions").slice(2);
+    assert.deepEqual(retry.map(call => call.options.body.get("idempotency_key")), keys);
+    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.id("results-view").hidden, false);
+    assert.equal(app.id("review-view").hidden, true);
+});
+
+test("API guide displays placeholders and fetches only authenticated local OpenAPI", async (t) => {
+    const app = setup(t); await app.login(); await app.click("nav-api");
+    assert.match(app.id("api-view").textContent, /file=@synthetic.png/);
+    assert.match(app.id("api-view").textContent, /LOCAL_ACCESS_TOKEN/);
+    assert.match(app.id("api-view").textContent, /requests.post/);
+    assert.match(app.id("api-view").textContent, /MODEL_CONSENT_REQUIRED/);
+    assert.doesNotMatch(app.id("api-view").textContent, /synthetic-dom-access-token/);
+    app.on("/api/openapi.json", () => json({ openapi: "3.1.0", info: { title: '<script>window.syntheticAttack=true</script>' }, paths: { "/api/recognitions": {} } }));
+    await app.click("api-schema");
+    assert.match(app.id("api-schema-content").textContent, /\/api\/recognitions/);
+    assert.equal(app.id("api-schema-content").querySelector("script"), null);
+    assert.equal(app.window.syntheticAttack, undefined);
+    assert.equal(app.requests.filter(request => request.method !== "GET").length, 0);
+});
+
+
+test("result evidence uses authenticated blobs, rejects external source URLs and clears loaded data on logout", async (t) => {
+    const app = setup(t); await app.login(); await app.click("nav-results");
+    app.document.querySelector(".recognition-task").click(); await flush();
+    const preview = app.id("result-detail").querySelector("img");
+    assert.match(preview.src, /^blob:/);
+    const urls = app.created.map(item => item.url);
+    assert.ok(urls.length > 0);
+    await app.click("logout-button");
+    assert.equal(app.id("result-detail").querySelector("img"), null);
+    assert.doesNotMatch(app.id("result-detail").textContent, /Synthetic Customer/);
+    assert.equal(app.id("results-list").textContent, "");
+    assert.equal(app.id("results-count").textContent, "");
+    assert.ok(urls.every(url => app.revoked.includes(url)));
+    app.server.tasks[0].sources[0].url = "https://untrusted.example/synthetic.png";
+    await app.login(); await app.click("nav-results");
+    app.document.querySelector(".recognition-task").click(); await flush();
+    assert.equal(app.id("result-detail").querySelector("img"), null);
+    assert.match(app.id("result-detail").textContent, /原图读取失败/);
+});
+
+test("a stale result-image response cannot overwrite a newly selected result", async (t) => {
+    const beta = makeTask({ id: "task-2", sources: [{ id: "source-2", filename: "synthetic-beta.png", url: "/api/sources/source-2" }] });
+    const app = setup(t, { tasks: [makeTask(), beta] }); await app.login(); await app.click("nav-results");
+    const late = deferred();
+    app.on("/api/sources/source-1", () => late.promise);
+    app.document.querySelector('[data-result-task-id="task-1"]').click(); await flush();
+    app.document.querySelector('[data-result-task-id="task-2"]').click(); await flush();
+    late.resolve(new Response(new Uint8Array([1]), { headers: { "Content-Type": "image/png" } }));
+    await flush();
+    assert.equal(app.id("result-detail").querySelectorAll("img").length, 1);
+    assert.match(app.id("result-detail").querySelector("img").alt, /synthetic-beta/);
+});
+
+
+test("optional order errors never block independent recognition result access", async (t) => {
+    const app = setup(t);
+    app.on("/api/orders", () => json({ error: { code: "REQUEST_FAILED" } }, 500), { once: false });
+    await app.login(); await app.click("nav-results");
+    app.document.querySelector(".recognition-task").click(); await flush();
+    assert.match(app.id("result-detail").textContent, /Synthetic Customer Alpha/);
+    assert.match(app.id("result-detail").textContent, /未经人工核实/);
+});
+
+test("result-image retry recovers without changing extracted data or writing business records", async (t) => {
+    const app = setup(t);
+    app.on("/api/sources/source-1", () => json({ error: { code: "REQUEST_FAILED" } }, 500));
+    await app.login(); await app.click("nav-results");
+    app.document.querySelector(".recognition-task").click(); await flush();
+    assert.equal(app.id("result-detail").querySelector("img"), null);
+    const retry = Array.from(app.id("result-detail").querySelectorAll("button")).find(node => node.textContent === "重新读取原图");
+    assert.ok(retry); retry.click(); await flush();
+    assert.match(app.id("result-detail").querySelector("img").src, /^blob:/);
+    assert.match(app.id("result-detail").textContent, /Synthetic Customer Alpha/);
+    assert.equal(app.requests.filter(request => request.method !== "GET").length, 0);
+});
+
+
+test("automatic polling cannot supersede a pending explicit result selection or lose its keyboard focus", async (t) => {
+    const app = setup(t); await app.login(); await app.click("nav-results");
+    const late = deferred();
+    app.on("/api/recognitions/task-1", () => late.promise);
+    app.document.querySelector(".recognition-task").click(); await flush();
+    await app.runTimers(4000);
+    assert.equal(app.calls("/api/recognitions/task-1").length, 1);
+    late.resolve(json({ schema_version: "1", task_id: "task-1", status: "succeeded", model_revision: 0, review_status: "review_required" }));
+    await flush();
+    assert.equal(app.document.activeElement, app.id("result-detail"));
+    assert.match(app.id("result-detail").textContent, /Synthetic Customer Alpha/);
 });

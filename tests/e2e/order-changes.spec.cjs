@@ -121,6 +121,8 @@ async function upload(page, data, suffix) {
     expect(result.duplicates).toEqual([]);
     expect(result.tasks).toHaveLength(1);
     await expect(page.locator("#upload-dialog")).not.toBeVisible();
+    await expect(page.locator("#results-view")).toBeVisible();
+    await page.locator("#result-review").click();
     await expect(page.locator("#task-workspace")).toBeVisible();
     await expect(page.locator("#task-status")).toHaveText("待审核");
     await expect(page.locator("#review-form")).toBeVisible();

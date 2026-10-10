@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ocrs.capture import validate_image
+from ocrs.capture import CaptureError, validate_image
 from ocrs.config import Settings
 from ocrs.domain import Candidate, CandidateEvent, StrictModel, validate_confirmation
 from ocrs.exporter import ExportError, write_workbook
@@ -85,6 +85,8 @@ class Service:
         self.root = settings.data_dir
         self.model_store = model_store
         self._model_lock = threading.RLock()
+        self._dispatch_lock = threading.RLock()
+        self._recognition_lock = threading.Lock()
         self._provider_revision = -1
         self.provider: RecognitionProvider = (
             self._make_provider(settings) if model_store is None else DemoProvider()
@@ -125,7 +127,7 @@ class Service:
 
     def save_model_settings(self, body: ModelSettingsUpdate) -> dict[str, Any]:
         assert self.model_store is not None
-        with self._model_lock:
+        with self._dispatch_lock, self._model_lock:
             saved = self.model_store.save(body)
             # Revision binding is the fail-closed guard even if this independent
             # business-DB transaction fails after settings were committed.
@@ -140,7 +142,7 @@ class Service:
     def enable_external(self, expected_revision: int, confirm_external: bool) -> dict[str, Any]:
         """Explicitly enable the current destination, never authorize queued evidence."""
         assert self.model_store is not None
-        with self._model_lock:
+        with self._dispatch_lock, self._model_lock:
             if not confirm_external:
                 raise AppError("MODEL_CONSENT_REQUIRED", "请明确确认开启外部调用", 409)
             current = self.model_store.public()
@@ -176,12 +178,124 @@ class Service:
         self, config_revision: int | None, confirm_external: bool
     ) -> tuple[Settings, int]:
         settings, revision = self.runtime_settings()
-        if self.model_store and settings.provider != "demo":
+        if settings.provider != "demo":
             if not settings.allow_external or not settings.api_key or not settings.model:
                 raise AppError("MODEL_DISABLED", "请先在模型设置保存完整配置并允许外部调用", 409)
             if not confirm_external or config_revision != revision:
                 raise AppError("MODEL_CONSENT_REQUIRED", "请确认当前模型目的地及本次图片外传", 409)
         return settings, revision
+
+    def submit_recognition(
+        self,
+        data: bytes,
+        filename: str,
+        content_type: str | None,
+        source_label: str = "manual",
+        *,
+        idempotency_key: str | None = None,
+        config_revision: int | None = None,
+        confirm_external: bool = False,
+    ) -> dict[str, Any]:
+        """Accept one image; replay never renews consent or resends old evidence."""
+        if not source_label.strip() or len(source_label) > 200 or len(filename) > 255:
+            raise AppError("SOURCE_INVALID", "来源备注或文件名无效")
+        if idempotency_key is not None and (
+            not 8 <= len(idempotency_key) <= 100 or not idempotency_key.strip()
+        ):
+            raise AppError("VALIDATION_ERROR", "幂等键须为 8 至 100 字符", 422)
+        try:
+            image = validate_image(data, max_bytes=self.settings.max_upload_bytes)
+        except CaptureError as exc:
+            codes = {
+                "image_invalid": ("IMAGE_INVALID", 400),
+                "image_too_large": ("IMAGE_TOO_LARGE", 413),
+                "image_too_many_pixels": ("IMAGE_TOO_MANY_PIXELS", 413),
+                "image_animated": ("IMAGE_ANIMATED", 400),
+                "image_type_unsupported": ("IMAGE_UNSUPPORTED", 415),
+            }
+            code, status = codes.get(exc.code, ("IMAGE_INVALID", 400))
+            raise AppError(code, "图片无效或超过限制", status) from None
+        if content_type != image.mime:
+            raise AppError("IMAGE_TYPE_MISMATCH", "声明的图片类型与实际内容不一致")
+        payload_hash = hashlib.sha256(
+            encode(
+                {
+                    "image_digest": image.sha256,
+                    "source_label": source_label,
+                    "config_revision": config_revision,
+                    "confirm_external": confirm_external,
+                }
+            ).encode()
+        ).hexdigest()
+        with self._model_lock:
+            # Query replay before current model authorization. A configuration
+            # change may prevent a new request, but cannot hide an old task.
+            with transaction(self.root) as db:
+                prior = self._prior_submission(
+                    db, image.sha256, source_label, idempotency_key, payload_hash
+                )
+                if prior:
+                    old = self._task(db, prior)
+                    if old["sources"][0]["expired"]:
+                        raise AppError("EVIDENCE_EXPIRED", "重复图片的原图已清理", 410)
+                    if old["provider"] == "demo":
+                        raise AppError(
+                            "DEMO_SOURCE_CONFLICT",
+                            "相同图片与来源已用于演示，请更换来源备注后提交",
+                            409,
+                        )
+                    return self._recognition_task(db, prior, duplicate=True)
+            runtime, revision = self.runtime_settings()
+            if runtime.provider == "demo":
+                raise AppError(
+                    "MODEL_NOT_CONFIGURED", "请配置真实识别模型；正式接口不生成演示数据", 409
+                )
+            runtime, revision = self._authorize_model(config_revision, confirm_external)
+            task, duplicate = self._ingest(
+                data,
+                filename,
+                source_label,
+                runtime,
+                revision,
+                confirm_external,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+            )
+            with connect(self.root) as db:
+                db.execute("BEGIN")
+                return self._recognition_task(db, task["id"], duplicate=duplicate)
+
+    def _prior_submission(
+        self,
+        db: sqlite3.Connection,
+        digest: str,
+        source_label: str,
+        idempotency_key: str | None,
+        payload_hash: str | None,
+    ) -> str | None:
+        if idempotency_key is not None:
+            prior = db.execute(
+                "SELECT payload_hash,task_id FROM recognition_requests WHERE key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if prior:
+                if prior["payload_hash"] != payload_hash:
+                    raise AppError("IDEMPOTENCY_CONFLICT", "幂等键已用于不同请求", 409)
+                return str(prior["task_id"])
+        prior = db.execute(
+            "SELECT t.id FROM tasks t JOIN sources s ON s.id=t.source_id "
+            "WHERE s.digest=? AND s.source_label=?",
+            (digest, source_label),
+        ).fetchone()
+        if not prior:
+            return None
+        task_id = str(prior["id"])
+        if idempotency_key is not None:
+            db.execute(
+                "INSERT INTO recognition_requests VALUES(?,?,?)",
+                (idempotency_key, payload_hash, task_id),
+            )
+        return task_id
 
     def recover(self) -> None:
         with transaction(self.root) as db:
@@ -232,6 +346,9 @@ class Service:
         runtime: Settings,
         revision: int,
         confirm_external: bool,
+        *,
+        idempotency_key: str | None = None,
+        payload_hash: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if not source_label.strip() or len(source_label) > 200 or len(filename) > 255:
             raise AppError("SOURCE_INVALID", "来源标签或文件名无效")
@@ -239,15 +356,12 @@ class Service:
         created_path: Path | None = None
         try:
             with transaction(self.root) as db:
-                prior = db.execute(
-                    (
-                        "SELECT t.id FROM tasks t JOIN sources s ON s.id=t.source_id "
-                        "WHERE s.digest=? AND s.source_label=?"
-                    ),
-                    (image.sha256, source_label),
-                ).fetchone()
+                prior = self._prior_submission(
+                    db, image.sha256, source_label, idempotency_key, payload_hash
+                )
                 if prior:
-                    return self._task(db, prior["id"]), True
+                    return self._task(db, prior), True
+                self._check_capacity(db)
                 source_id, task_id = uid(), uid()
                 relative = f"images/{source_id}{image.extension}"
                 path = self.root / relative
@@ -297,6 +411,11 @@ class Service:
                         int(confirm_external),
                     ),
                 )
+                if idempotency_key is not None:
+                    db.execute(
+                        "INSERT INTO recognition_requests VALUES(?,?,?)",
+                        (idempotency_key, payload_hash, task_id),
+                    )
                 return self._task(db, task_id), False
         except BaseException:
             if created_path is not None:
@@ -313,6 +432,95 @@ class Service:
                     # currently unavailable. Do not hide the original failure.
                     logger.error('{"error_code":"EVIDENCE_CLEANUP_PENDING"}')
             raise
+
+    def _check_capacity(self, db: sqlite3.Connection) -> None:
+        pending = db.execute(
+            "SELECT count(*) FROM tasks WHERE status IN ('received','recognizing')"
+        ).fetchone()[0]
+        if pending >= self.settings.max_pending_tasks:
+            raise AppError("QUEUE_FULL", "识别队列已满，请等待现有任务完成后重试", 429)
+
+    def _recognition_task(
+        self, db: sqlite3.Connection, task_id: str, *, duplicate: bool = False
+    ) -> dict[str, Any]:
+        task = self._task(db, task_id)
+        model_result = db.execute(
+            "SELECT 1 FROM candidate_history WHERE task_id=? AND attempt=? LIMIT 1",
+            (task_id, task["attempts"]),
+        ).fetchone()
+        status = task["status"]
+        if status not in {"received", "recognizing", "failed"} and model_result:
+            status = "succeeded"
+        elif status not in {"received", "recognizing"}:
+            status = "failed"
+        if task["sources"][0]["expired"]:
+            status = "failed"
+        return {
+            "schema_version": "1",
+            "task_id": task_id,
+            "status": status,
+            "version": task["version"],
+            "provider": task["provider"],
+            "model_revision": task["model_revision"],
+            "recognition_mode": "demo" if task["provider"] == "demo" else "external",
+            "verified": False,
+            "review_status": task["status"],
+            "duplicate": duplicate,
+            "result_url": f"/api/recognitions/{task_id}/result",
+            "error_code": (
+                "EVIDENCE_EXPIRED"
+                if task["sources"][0]["expired"]
+                else task["error_code"] or "TASK_REJECTED"
+            )
+            if status == "failed"
+            else None,
+            "created_at": task["created_at"],
+            "updated_at": task["updated_at"],
+        }
+
+    def recognition_task(self, task_id: str) -> dict[str, Any]:
+        with connect(self.root) as db:
+            db.execute("BEGIN")
+            return self._recognition_task(db, task_id)
+
+    def recognition_result(self, task_id: str) -> dict[str, Any]:
+        with connect(self.root) as db:
+            db.execute("BEGIN")
+            task = self._task(db, task_id)
+            if task["sources"][0]["expired"]:
+                raise AppError("EVIDENCE_EXPIRED", "原图与识别候选已按保留策略清理", 410)
+            if task["status"] in {"received", "recognizing"}:
+                raise AppError("RESULT_NOT_READY", "识别结果尚未就绪，请继续轮询", 409)
+            if task["status"] == "failed":
+                raise AppError(
+                    "RECOGNITION_FAILED",
+                    "任务未产生可读取的识别结果",
+                    409,
+                    {"task_id": task_id, "error_code": task["error_code"]},
+                )
+            model = db.execute(
+                "SELECT candidate FROM candidate_history WHERE task_id=? AND attempt=? "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id, task["attempts"]),
+            ).fetchone()
+            if not model:
+                if task["status"] in {"received", "recognizing"}:
+                    raise AppError("RESULT_NOT_READY", "识别结果尚未就绪，请继续轮询", 409)
+                raise AppError(
+                    "RECOGNITION_FAILED",
+                    "任务未产生可读取的识别结果",
+                    409,
+                    {"task_id": task_id, "error_code": task["error_code"] or "TASK_REJECTED"},
+                )
+            return {
+                "schema_version": "1",
+                "task_id": task_id,
+                "status": "succeeded",
+                "verified": False,
+                "recognition_mode": "demo" if task["provider"] == "demo" else "external",
+                "review_status": task["status"],
+                "result": json.loads(model["candidate"]),
+            }
 
     def _task(
         self, db: sqlite3.Connection, task_id: str, *, include_history: bool = False
@@ -434,6 +642,15 @@ class Service:
         return result
 
     def process_one(self) -> bool:
+        # One worker per data directory, including direct concurrent invocations.
+        if not self._recognition_lock.acquire(blocking=False):
+            return False
+        try:
+            return self._process_one()
+        finally:
+            self._recognition_lock.release()
+
+    def _process_one(self) -> bool:
         with self._model_lock:
             runtime, revision = self.runtime_settings()
             claimed = self._claim_task(runtime, revision)
@@ -446,21 +663,29 @@ class Service:
             if self.model_store:
                 if row["model_revision"] != revision:
                     raise AppError("MODEL_CONFIG_CHANGED", "模型配置已改变，请确认后重新识别")
-                if runtime.provider != "demo" and (
-                    not runtime.allow_external
-                    or not runtime.api_key
-                    or not runtime.model
-                    or not row["external_authorized"]
-                ):
-                    raise AppError("MODEL_CONSENT_REQUIRED", "本任务尚未确认外传")
+            if runtime.provider != "demo" and (
+                not runtime.allow_external
+                or not runtime.api_key
+                or not runtime.model
+                or not row["external_authorized"]
+            ):
+                raise AppError("MODEL_CONSENT_REQUIRED", "本任务尚未确认外传")
             if row["expired"]:
                 raise AppError("EVIDENCE_EXPIRED", "原图已过期")
             image_path = self.root / row["path"]
             if hashlib.sha256(image_path.read_bytes()).hexdigest() != row["digest"]:
                 raise AppError("EVIDENCE_CHANGED", "原图摘要已变更")
-            candidate = provider.recognize(
-                [RecognitionSource(id=row["source_id"], path=image_path, mime=row["mime"])]
-            )
+            # Hold the configuration gate from the final revision check through
+            # the synchronous adapter call. Saving waits for this authorized
+            # in-flight snapshot, and after save returns no old call can begin.
+            with self._dispatch_lock:
+                with self._model_lock:
+                    _, current_revision = self.runtime_settings()
+                    if current_revision != revision:
+                        raise AppError("MODEL_CONFIG_CHANGED", "模型配置已改变，请重新授权")
+                candidate = provider.recognize(
+                    [RecognitionSource(id=row["source_id"], path=image_path, mime=row["mime"])]
+                )
             self._validate_evidence(candidate, {row["source_id"]})
             payload = candidate.model_dump_json()
             with transaction(self.root) as db:
@@ -509,9 +734,9 @@ class Service:
                 (
                     "UPDATE tasks SET "
                     "status='recognizing',attempts=attempts+1,version=version+1,u"
-                    "pdated_at=?,provider=? WHERE id=?"
+                    "pdated_at=? WHERE id=?"
                 ),
-                (now(), runtime.provider, task_id),
+                (now(), task_id),
             )
         return row, provider
 
@@ -573,14 +798,25 @@ class Service:
         confirm_external: bool = False,
     ) -> dict[str, Any]:
         with self._model_lock:
-            _, revision = self._authorize_model(config_revision, confirm_external)
-            return self._retry(task_id, expected_version, revision, confirm_external)
+            runtime, revision = self._authorize_model(config_revision, confirm_external)
+            return self._retry(
+                task_id, expected_version, revision, confirm_external, runtime.provider
+            )
 
     def _retry(
-        self, task_id: str, expected_version: int | None, revision: int, confirm_external: bool
+        self,
+        task_id: str,
+        expected_version: int | None,
+        revision: int,
+        confirm_external: bool,
+        provider: str,
     ) -> dict[str, Any]:
         with transaction(self.root) as db:
             task = self._task(db, task_id)
+            if provider == "demo" and task["provider"] != "demo":
+                raise AppError(
+                    "MODEL_NOT_CONFIGURED", "真实识别任务不能降为演示，请配置真实模型", 409
+                )
             if expected_version is not None and task["version"] != expected_version:
                 raise AppError("VERSION_CONFLICT", "任务状态已改变，请刷新", 409)
             if task["status"] != "failed":
@@ -591,13 +827,14 @@ class Service:
                 raise AppError(
                     "RETRY_LIMIT", "任务已达 5 次尝试上限，请检查配置后重新导入新来源", 409
                 )
+            self._check_capacity(db)
             db.execute(
                 (
                     "UPDATE tasks SET "
                     "status='received',error_code=NULL,version=version+1,updated_at=?,"
-                    "model_revision=?,external_authorized=? WHERE id=?"
+                    "model_revision=?,external_authorized=?,provider=? WHERE id=?"
                 ),
-                (now(), revision, int(confirm_external), task_id),
+                (now(), revision, int(confirm_external), provider, task_id),
             )
             return self._task(db, task_id)
 
@@ -997,7 +1234,7 @@ class Service:
             "export": export_status,
             "pending_export_events": pending,
             "recognition_avg_ms": avg,
-            "inbox_enabled": self.settings.inbox is not None,
+            "inbox_enabled": False,
             "inbox": json.loads(inbox[0]) if inbox else None,
             "sku_catalog": sorted(self.settings.sku_catalog),
         }

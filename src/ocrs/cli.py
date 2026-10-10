@@ -27,7 +27,7 @@ from ocrs.storage import (
 
 def main() -> None:
     load_dotenv(override=False)
-    parser = argparse.ArgumentParser(description="OCRS 本地截图订单审核")
+    parser = argparse.ArgumentParser(description="OCRS 本地截图信息识别（可选订单审核与导出）")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="创建本地数据库、应用迁移并生成本地访问令牌")
     commands.add_parser("token", help="在本机终端显示访问令牌，请勿分享或记录")

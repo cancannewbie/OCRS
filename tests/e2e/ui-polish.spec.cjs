@@ -254,7 +254,7 @@ test("local SVG navigation stays immediate, accessible, and usable at each viewp
     }
     await mobileTargets(page, ["#open-upload", "#refresh-button", "#nav-dashboard", "#nav-review"]);
     await capture(page, testInfo, "polish-dashboard");
-    for (const view of ["review", "orders", "exports", "settings", "dashboard"]) {
+    for (const view of ["results", "api", "review", "orders", "exports", "settings", "dashboard"]) {
         const snapshot = await page.locator(`#nav-${view}`).evaluate((node, name) => {
             node.click();
             return { current: node.getAttribute("aria-current"),

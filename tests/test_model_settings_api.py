@@ -275,19 +275,29 @@ def test_running_task_keeps_one_provider_model_key_snapshot(app, monkeypatch):
     thread = threading.Thread(target=service.process_one)
     thread.start()
     assert started.wait(5)
-    service.save_model_settings(
-        ModelSettingsUpdate(
-            **payload(
-                1,
-                provider="openai-compatible",
-                model="synthetic-vision",
-                base_url="https://api.openai.com/v1",
-                api_key="synthetic-second-key",
+    saved = threading.Event()
+
+    def save():
+        service.save_model_settings(
+            ModelSettingsUpdate(
+                **payload(
+                    1,
+                    provider="openai-compatible",
+                    model="synthetic-vision",
+                    base_url="https://api.openai.com/v1",
+                    api_key="synthetic-second-key",
+                )
             )
         )
-    )
+        saved.set()
+
+    saving = threading.Thread(target=save)
+    saving.start()
+    assert not saved.wait(0.05)
     release.set()
     thread.join(5)
+    saving.join(5)
+    assert saved.is_set()
     assert not thread.is_alive()
     assert used == [("https://api.minimax.cn/v1/chat/completions", "MiniMax-M3", KEY)]
     assert service.task(task["id"])["status"] == "review_required"
@@ -309,7 +319,7 @@ def test_schema_one_migration_preserves_facts_but_revokes_old_queue(tmp_path):
         )
     migrate(tmp_path)
     with connect(tmp_path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         task = db.execute("SELECT * FROM tasks").fetchone()
         assert task["model_revision"] == -1
         assert task["external_authorized"] == 0

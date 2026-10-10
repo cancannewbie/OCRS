@@ -4,6 +4,7 @@
     const byId = (id) => document.getElementById(id);
     const TOKEN_KEY = "ocrs_access_token";
     const STATUS_LABELS = {
+        succeeded: "提取完成 · 未核实",
         received: "等待识别",
         queued: "等待识别",
         recognizing: "识别中",
@@ -17,6 +18,15 @@
         canceled: "已撤单",
     };
     const ERROR_MESSAGES = {
+        DEMO_SOURCE_CONFLICT: "此图片与来源备注已有离线 demo 记录。真实识别请使用不同来源备注；旧演示数据保留。",
+        MODEL_NOT_CONFIGURED: "真实图片模型尚未配置，正式识别不可用。离线演示不执行 OCR。",
+        RESULT_NOT_READY: "结果尚未就绪，请稍后查询。",
+        RECOGNITION_FAILED: "识别失败，原图已保留，请核对原因后手动重试。",
+        QUEUE_FULL: "识别队列容量已满，请稍后重试。已接收的图片任务仍保留。",
+        MULTIPART_INVALID: "上传请求格式无效，请重新选择图片后重试。",
+        INTERNAL_ERROR: "本机处理失败，请保留原图片和来源备注，核对任务后再重试。",
+        IMAGE_INVALID: "图片无法解码，请上传有效的静态 PNG、JPEG 或 WebP。",
+        IMAGE_TYPE_MISMATCH: "声明的图片类型与实际内容不一致，请重新导出图片。",
         UNAUTHORIZED: "访问令牌无效或已失效，请重新验证。",
         AUTHENTICATION_REQUIRED: "请先验证访问令牌。",
         INVALID_TOKEN: "访问令牌无效或已失效，请重新验证。",
@@ -94,6 +104,17 @@
         imageGeneration: 0,
         refreshPromise: null,
         timer: null,
+        resultBlobs: new Set(),
+        resultImageGeneration: 0,
+        recognitionTasks: [],
+        resultId: null,
+        resultGeneration: 0,
+        resultLoading: false,
+        resultLastKey: null,
+        resultsGeneration: 0,
+        resultsPage: { total: 0, limit: 50, offset: 0, has_more: false },
+        resultsSearchTimer: null,
+        uploadSubmission: null,
         view: "dashboard",
         reviewDetail: false,
         taskCache: new Map(),
@@ -407,6 +428,26 @@
         clearTimeout(state.searchTimer);
         revokeImages();
         state.tasks = [];
+        revokeResultImages();
+        state.recognitionTasks = [];
+        state.resultId = null;
+        state.resultGeneration += 1;
+        state.resultLoading = false;
+        state.resultsGeneration += 1;
+        state.resultLastKey = null;
+        state.resultsPage = { total: 0, limit: 50, offset: 0, has_more: false };
+        state.uploadSubmission = null;
+        clearTimeout(state.resultsSearchTimer);
+        byId("results-search").value = "";
+        byId("results-list").replaceChildren();
+        byId("results-count").textContent = "";
+        byId("results-previous").disabled = true;
+        byId("results-next").disabled = true;
+        byId("result-detail").replaceChildren(element("h2", "", "选择一张图片"), element("p", "muted", "查看处理状态、原始提取字段、证据与不确定原因。"));
+        byId("api-schema-content").replaceChildren();
+        byId("api-schema-content").hidden = true;
+        byId("api-schema-error").hidden = true;
+        byId("api-schema").disabled = false;
         state.orders = [];
         state.attentionTasks = [];
         state.status = null;
@@ -527,6 +568,7 @@
 
     async function refresh(silent = false) {
         if (!state.token) return;
+        if (state.view === "results") void loadResults();
         if (state.refreshPromise) {
             state.refreshPending = true;
             return state.refreshPromise;
@@ -549,7 +591,7 @@
                         if (error.code === "TASK_NOT_FOUND") return null;
                         throw error;
                     }) : null,
-                    state.view === "dashboard" ? request("/api/tasks?limit=5&offset=0&status=review_required") : null,
+                    state.view === "dashboard" ? request("/api/tasks?limit=5&offset=0") : null,
                 ]);
                 if (epoch !== state.epoch) return;
                 state.status = status;
@@ -575,7 +617,7 @@
                 renderQueue();
                 renderOrders();
                 renderDashboard();
-                if (state.selectedId && state.reviewDetail) {
+                if (state.view === "review" && state.selectedId && state.reviewDetail) {
                     const task = selectedTask();
                     if (task) renderSelectedTask(task);
                 } else renderEmpty();
@@ -628,7 +670,7 @@
         const review =
             counts.review_required ??
             count((task) => task.status === "review_required");
-        byId("count-review").textContent = review;
+        byId("count-review").textContent = Object.keys(counts).length ? ["review_required", "confirmed", "rejected"].reduce((sum, key) => sum + (counts[key] || 0), 0) : count((task) => !!(task.model_candidate || task.candidate));
         byId("nav-review-count").textContent = review;
         byId("count-processing").textContent = Object.keys(counts).length
             ? ["received", "queued", "recognizing", "processing"].reduce(
@@ -640,25 +682,8 @@
             counts.failed ?? count((task) => task.status === "failed");
         byId("count-confirmed").textContent =
             counts.confirmed ?? count((task) => task.status === "confirmed");
-        byId("inbox-note").textContent = status.inbox_enabled
-            ? "文件夹导入已启用：仅处理指定文件夹中已保存的截图，不读取微信聊天。"
-            : "仅处理手动导入的截图，不读取微信聊天。";
-        byId("inbox-banner").hidden = !status.inbox_enabled;
-        const inbox = status.inbox;
-        byId("inbox-summary").textContent = inbox
-            ? `上次扫描：导入 ${inbox.imported || 0} 张，等待 ${inbox.pending || 0} 张，已处理 ${inbox.skipped || 0} 张。${inbox.updated_at ? `更新于 ${localDate(inbox.updated_at)}` : ""}`
-            : "等待扫描已保存的截图；不会读取微信聊天。";
-        const inboxErrors = Array.isArray(inbox?.errors) ? inbox.errors : [];
-        byId("inbox-errors").hidden = !inboxErrors.length;
-        byId("inbox-error-list").replaceChildren();
-        for (const error of inboxErrors)
-            byId("inbox-error-list").append(
-                element(
-                    "li",
-                    "",
-                    `${error.filename || "未命名文件"} · ${safeCode(error.code)}`,
-                ),
-            );
+        byId("inbox-note").textContent = "仅接收页面上传或 API 提交的图片；文件夹导入已停用，不启动来源扫描。";
+        byId("inbox-banner").hidden = true;
         const exportState = status.export || {};
         const descriptions = {
             none: "尚未生成 Excel，可点击重新生成",
@@ -2119,6 +2144,7 @@
     function openUpload() {
         if (state.view === "settings" && !discardModelChanges()) return;
         byId("upload-error").hidden = true;
+        byId("upload-submit").textContent = state.status?.provider === "demo" ? "运行离线演示" : "上传并识别";
         openDialog("upload-dialog", "upload-files");
     }
 
@@ -2166,31 +2192,53 @@
         try {
             const consent = await authorizeRecognition(`本次选定的 ${files.length} 张完整截图及来源标签`);
             if (consent === null || epoch !== state.epoch) return;
-            for (const [key, value] of Object.entries(consent)) body.append(key, String(value));
-            const result = await request("/api/uploads", {
-                method: "POST",
-                body,
-            });
+
+            let result;
+            if (!Object.hasOwn(consent, "config_revision")) {
+                result = await request("/api/uploads", { method: "POST", body });
+            } else {
+                const label = byId("source-label").value.trim() || "manual";
+                const previous = state.uploadSubmission;
+                if (!previous || previous.label !== label || previous.revision !== consent.config_revision ||
+                    previous.files.length !== files.length || previous.files.some((file, index) => file !== files[index])) {
+                    state.uploadSubmission = { label, revision: consent.config_revision, files, keys: files.map(() => uniqueKey()), accepted: [] };
+                }
+                const submission = state.uploadSubmission;
+                const tasks = [];
+                const duplicates = [];
+                for (const [index, file] of files.entries()) {
+                    const single = new FormData();
+                    single.append("file", file);
+                    single.append("source_label", label);
+                    single.append("idempotency_key", submission.keys[index]);
+                    for (const [key, value] of Object.entries(consent)) single.append(key, String(value));
+                    const accepted = await request("/api/recognitions", { method: "POST", body: single });
+                    if (epoch !== state.epoch) return;
+                    tasks.push({ id: accepted.task_id });
+                    if (!submission.accepted.includes(accepted.task_id)) submission.accepted.push(accepted.task_id);
+                    if (accepted.duplicate) duplicates.push(accepted.task_id);
+                }
+                result = { tasks, duplicates };
+            }
             if (epoch !== state.epoch) return;
             closeDialog("upload-dialog");
             byId("upload-form").reset();
+            state.uploadSubmission = null;
             showFiles();
             const count = result.tasks?.length || 0;
             const duplicateCount = result.duplicates?.length || 0;
-            notice(
-                `已接收 ${count} 张截图${duplicateCount ? `，其中 ${duplicateCount} 张已存在，未重复导入` : ""}。`,
-            );
-            switchView("review");
+            notice("已接收 " + count + " 张图片" + (duplicateCount ? "，其中 " + duplicateCount + " 张已存在，未重复导入" : "") + "。请在识别结果中查看；未经人工核实。");
+            switchView("results");
             await refresh();
             if (epoch !== state.epoch) return;
             const first = result.tasks?.[0];
-            if (first && typeof first === "object" && !state.taskCache.has(first.id)) state.taskCache.set(first.id, first);
-            if (first) await selectTask(typeof first === "string" ? first : first.id);
+            if (first) await selectResult(typeof first === "string" ? first : first.id, true);
         } catch (error) {
             if (epoch !== state.epoch) return;
             reportError(error, byId("upload-error"));
+            if (state.uploadSubmission?.accepted.length) byId("upload-error").textContent += " 已接收 " + state.uploadSubmission.accepted.length + " 张；保留所选图片与来源备注重试会复用同一请求。";
             if (["REQUEST_TIMEOUT", "NETWORK_ERROR"].includes(error.code)) {
-                byId("upload-error").textContent = `上传结果未知，图片可能已被接收。请先刷新核对任务队列；如需重试，保留相同图片和来源标签以复用原记录。（${safeCode(error.code)}）`;
+                byId("upload-error").textContent = `上传结果未知，图片可能已被接收。请先刷新核对识别结果；如需重试，保留相同图片和来源备注以复用原记录。（${safeCode(error.code)}）`;
                 await refresh();
             }
         } finally {
@@ -2209,10 +2257,221 @@
         }
     }
 
+
+    function revokeResultImages() {
+        state.resultImageGeneration += 1;
+        for (const url of state.resultBlobs) {
+            if (state.blobs.delete(url)) URL.revokeObjectURL(url);
+        }
+        state.resultBlobs.clear();
+    }
+
+    async function renderResultSources(id, list) {
+        const epoch = state.epoch;
+        const generation = state.resultImageGeneration;
+        list.replaceChildren(element("p", "muted", "正在读取受保护的原图…"));
+        const current = () => epoch === state.epoch && generation === state.resultImageGeneration && state.resultId === id;
+        try {
+            const task = await request("/api/tasks/" + encodeURIComponent(id));
+            if (!current()) return;
+            list.replaceChildren();
+            for (const [index, source] of (task.sources || []).entries()) {
+                const card = element("figure", "source-card result-source-card");
+                const caption = element("figcaption", "source-caption");
+                caption.append(element("span", "", source.filename || "原始图片"));
+                const placeholder = element("div", "source-placeholder", "正在读取受保护的原图…");
+                card.append(caption, placeholder);
+                list.append(card);
+                try {
+                    const blob = await request(source.url, { blob: true });
+                    if (!current()) return;
+                    if (!/^image\/(png|jpeg|webp)$/.test(blob.type)) throw makeError("INVALID_IMAGE");
+                    const url = URL.createObjectURL(blob);
+                    state.blobs.add(url);
+                    state.resultBlobs.add(url);
+                    const image = element("img");
+                    image.alt = "原始图片 " + (index + 1) + "：" + (source.filename || "未命名");
+                    image.src = url;
+                    image.loading = "lazy";
+                    const link = element("a", "", "查看原图");
+                    link.href = url;
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    caption.append(link);
+                    placeholder.replaceWith(image);
+                } catch (error) {
+                    if (!current()) return;
+                    placeholder.textContent = error.code === "EVIDENCE_EXPIRED" ? "原图已清理，无法预览。" : "原图读取失败。";
+                    if (error.code !== "EVIDENCE_EXPIRED") placeholder.append(actionButton("重新读取原图", "secondary small", () => { revokeResultImages(); void renderResultSources(id, list); }));
+                }
+            }
+            if (!task.sources?.length) list.append(element("p", "muted", "未找到可供核对的原图。"));
+        } catch (error) {
+            if (current()) list.replaceChildren(element("p", "muted", "原图读取失败。"), actionButton("重新读取原图", "secondary small", () => { revokeResultImages(); void renderResultSources(id, list); }));
+        }
+    }
+
+    function recognitionStatus(task) {
+        if (["received", "recognizing", "failed"].includes(task.status)) return task.status;
+        return task.model_candidate || task.candidate ? "succeeded" : task.status;
+    }
+
+    async function loadResults() {
+        if (!state.token) return;
+        const epoch = state.epoch;
+        const generation = ++state.resultsGeneration;
+        const query = new URLSearchParams({ limit: String(state.resultsPage.limit), offset: String(state.resultsPage.offset) });
+        const search = byId("results-search").value.trim();
+        if (search) query.set("q", search);
+        setBusy("results-list", true);
+        try {
+            const data = await request("/api/tasks?" + query);
+            if (epoch !== state.epoch || generation !== state.resultsGeneration) return;
+            state.recognitionTasks = Array.isArray(data.tasks) ? data.tasks : [];
+            state.resultsPage = { ...state.resultsPage, total: data.total ?? state.recognitionTasks.length, has_more: data.has_more ?? false };
+            renderResultsList();
+            if (state.resultId && !state.resultLoading) void selectResult(state.resultId);
+        } catch (error) {
+            if (epoch !== state.epoch || generation !== state.resultsGeneration) return;
+            byId("results-list").replaceChildren(element("p", "form-error", errorText(error)), actionButton("重新读取", "secondary", loadResults));
+        } finally {
+            if (epoch === state.epoch && generation === state.resultsGeneration) setBusy("results-list", false);
+        }
+    }
+
+    function renderResultsList() {
+        const focused = document.activeElement?.dataset?.resultTaskId;
+        const list = byId("results-list");
+        list.replaceChildren();
+        for (const task of state.recognitionTasks) {
+            const button = element("button", "recognition-task");
+            button.type = "button";
+            button.dataset.resultTaskId = task.id;
+            button.setAttribute("aria-pressed", String(state.resultId === task.id));
+            button.append(element("strong", "", task.sources?.[0]?.filename || "图片任务 #" + shortId(task.id)),
+                badge(recognitionStatus(task)), element("small", "muted", (task.sources?.[0]?.source_label || "无来源备注") + " · #" + shortId(task.id)));
+            if (task.provider === "demo") button.append(element("small", "muted", "离线演示 · 不执行 OCR"));
+            button.addEventListener("click", () => { void selectResult(task.id, true); });
+            list.append(button);
+        }
+        if (!state.recognitionTasks.length) list.append(element("p", "muted", "没有匹配的图片任务。"));
+        byId("results-count").textContent = "共 " + state.resultsPage.total + " 张";
+        byId("results-previous").disabled = state.resultsPage.offset === 0;
+        byId("results-next").disabled = !state.resultsPage.has_more;
+        if (focused) Array.from(list.querySelectorAll("button")).find((button) => button.dataset.resultTaskId === focused)?.focus();
+    }
+
+    function resultFields(rows) {
+        const list = element("dl", "recognition-result-fields");
+        for (const [label, value] of rows) {
+            const row = element("div");
+            row.append(element("dt", "", label), element("dd", "", value === null || value === undefined ? "未知 / 未提供（null）" : String(value)));
+            list.append(row);
+        }
+        return list;
+    }
+
+    async function selectResult(id, focus = false) {
+        if (!state.token) return;
+        const epoch = state.epoch;
+        const generation = ++state.resultGeneration;
+        state.resultLoading = true;
+        const changed = state.resultId !== id;
+        state.resultId = id;
+        if (changed) { revokeResultImages(); state.resultLastKey = null; }
+        renderResultsList();
+        const panel = byId("result-detail");
+        if (changed || focus) panel.replaceChildren(element("h2", "", "正在读取识别结果…"));
+        setBusy("result-detail", true);
+        try {
+            const task = await request("/api/recognitions/" + encodeURIComponent(id));
+            if (epoch !== state.epoch || generation !== state.resultGeneration) return;
+            let data = null;
+            if (task.status === "succeeded") data = await request("/api/recognitions/" + encodeURIComponent(id) + "/result");
+            if (epoch !== state.epoch || generation !== state.resultGeneration) return;
+            const key = JSON.stringify([task, data]);
+            if (!focus && state.resultLastKey === key) return;
+            state.resultLastKey = key;
+            revokeResultImages();
+            panel.replaceChildren(element("h2", "", "原始识别结果"), element("p", "inline-warning", "未经人工核实，不等于确认订单入账。此处展示原始模型提取，人工修正不会覆盖它。"));
+            panel.append(resultFields([["任务 ID", id], ["识别状态", labelStatus(task.status)], ["可选审核状态", labelStatus(task.review_status)], ["模型配置版本", task.model_revision]]));
+            const sourcePanel = element("section", "recognition-record");
+            sourcePanel.append(element("h3", "", "原始图片"));
+            const sourceList = element("div", "result-source-list");
+            sourceList.setAttribute("aria-live", "polite");
+            sourcePanel.append(sourceList);
+            panel.append(sourcePanel);
+            void renderResultSources(id, sourceList);
+            if (task.status === "failed") {
+                const code = safeCode(task.error_code || "RECOGNITION_FAILED");
+                panel.append(element("p", "form-error", errorText(makeError(code)) + "（" + code + "）"));
+            } else if (!data) panel.append(element("p", "muted", "结果尚未就绪，页面每 4 秒更新状态。"));
+            else {
+                if (data.recognition_mode === "demo") panel.append(element("p", "inline-warning", "离线演示，不执行 OCR；以下虚构结果与图片内容无关。"));
+                const result = data.result;
+                appendWarnings(panel, result.warnings, result.missing_reasons);
+                for (const [index, record] of (result.events || []).entries()) {
+                    const section = element("section", "recognition-record");
+                    section.append(element("h3", "", "提取记录 " + (index + 1)), resultFields([["动作", record.action], ["客户", record.customer], ["外部编号", record.external_id], ["币种", record.currency], ["发生时间", record.occurred_at], ["原因", record.reason]]));
+                    for (const [lineIndex, item] of (record.items || []).entries()) {
+                        section.append(element("h4", "", "商品字段 " + (lineIndex + 1)), resultFields([["商品编码", item.sku], ["商品名称", item.name], ["数量", item.quantity], ["单位", item.unit], ["单价", item.unit_price], ["明细 ID", item.line_id]]));
+                    }
+                    appendWarnings(section, record.warnings, record.missing_reasons);
+                    for (const evidence of record.evidence || []) section.append(element("p", "recognition-evidence", "原文证据 · " + (evidence.field || "未标注字段") + " · " + (evidence.source_id || "未标注来源") + "：" + (evidence.text ?? "未提供")));
+                    panel.append(section);
+                }
+                const raw = element("details", "recognition-record");
+                raw.append(element("summary", "", "查看完整结构化结果"));
+                const pre = element("pre", "api-code", JSON.stringify(data, null, 2));
+                pre.tabIndex = 0;
+                pre.setAttribute("aria-label", "完整原始识别 JSON");
+                raw.append(pre);
+                panel.append(raw);
+            }
+            const optional = actionButton(task.status === "failed" ? "进入可选审核 / 手动重试" : "进入可选人工审核", "secondary", () => selectTask(id));
+            optional.id = "result-review";
+            panel.append(optional);
+            if (focus) panel.focus();
+        } catch (error) {
+            if (epoch !== state.epoch || generation !== state.resultGeneration) return;
+            panel.replaceChildren(element("h2", "", "暂时无法读取结果"), element("p", "form-error", errorText(error)), actionButton("重新查询", "secondary", () => selectResult(id, true)));
+        } finally {
+            if (epoch === state.epoch && generation === state.resultGeneration) {
+                state.resultLoading = false;
+                setBusy("result-detail", false);
+            }
+        }
+    }
+
+    async function loadAPISchema() {
+        if (state.operations.has("api-schema")) return;
+        const epoch = state.epoch;
+        state.operations.add("api-schema");
+        byId("api-schema").disabled = true;
+        byId("api-schema-error").hidden = true;
+        try {
+            const schema = await request("/api/openapi.json");
+            if (epoch !== state.epoch) return;
+            byId("api-schema-content").textContent = JSON.stringify(schema, null, 2);
+            byId("api-schema-content").hidden = false;
+            byId("api-schema-content").focus();
+        } catch (error) { if (epoch === state.epoch) reportError(error, byId("api-schema-error")); }
+        finally {
+            if (epoch === state.epoch) { state.operations.delete("api-schema"); byId("api-schema").disabled = false; }
+        }
+    }
+
     function switchView(view) {
-        const titles = { dashboard: "工作台", review: "审核队列", orders: "正式订单", exports: "导出中心", settings: "运行配置" };
+        const titles = { dashboard: "上传识别", results: "识别结果", api: "API 接入", review: "审核队列", orders: "正式订单", exports: "导出中心", settings: "运行配置" };
         if (!Object.hasOwn(titles, view)) return;
         if (state.view === "settings" && view !== "settings" && !discardModelChanges()) return;
+        if (state.view === "results" && view !== "results") {
+            state.resultsGeneration += 1;
+            state.resultGeneration += 1;
+            state.resultLoading = false;
+            revokeResultImages();
+            state.resultLastKey = null;
+        }
         state.view = view;
         for (const name of Object.keys(titles)) {
             byId(`${name}-view`).hidden = view !== name;
@@ -2224,6 +2483,7 @@
         document.title = `${titles[view]} · OCRS`;
         if (view === "settings") { void loadConfig(); void loadModelSettings(); }
         if (view === "dashboard") renderDashboard();
+        if (view === "results") void loadResults();
     }
 
     function displayValue(value) {
@@ -2386,7 +2646,7 @@
         const tasks = state.attentionTasks;
         if (!tasks.length) {
             const empty = element("div", "dashboard-empty");
-            empty.append(element("strong", "", "当前没有待审核任务"), element("p", "", state.tasks.length ? "可查看处理中的任务、失败任务或已确认记录。" : "先导入一张完全虚构的截图，体验审核流程。"), actionButton("打开审核队列", "secondary small", () => { switchView("review"); showQueue(); }));
+            empty.append(element("strong", "", "当前没有图片任务"), element("p", "", state.tasks.length ? "可查看处理中的任务、失败任务或已确认记录。" : "上传已授权图片即可获取结果；离线 demo 仅供虚构演示。"), actionButton("查看识别结果", "secondary small", () => switchView("results")));
             content.append(empty);
             return;
         }
@@ -2397,7 +2657,7 @@
             const body = element("span", "task-body");
             body.append(element("strong", "", task.candidate?.events?.[0]?.customer || task.sources?.[0]?.filename || "待审核任务"), element("small", "", `#${shortId(task.id)} · ${localDate(task.created_at)}`));
             button.append(badge(task.status), body, icon("arrow-right"));
-            button.addEventListener("click", () => selectTask(task.id));
+            button.addEventListener("click", () => { switchView("results"); void selectResult(task.id, true); });
             content.append(button);
         }
         if (focusedTask) Array.from(content.querySelectorAll("button")).find((button) => button.dataset.dashboardTaskId === focusedTask)?.focus();
@@ -2608,7 +2868,7 @@
         const enable = !saved.allow_external;
         const opening = enable ? "开启此外部模型调用，并将" : "将";
         const boundary = enable ? "这会保存开启状态；其他图片仍须另行确认，不会自动发送旧队列。可在模型设置关闭。" : "";
-        if (!window.confirm(`${opening}${scope}发送至 ${saved.base_url}，使用模型 ${saved.model} 识别订单。可能产生供应商费用。${boundary}确认您有权外传这些资料并继续？`)) return null;
+        if (!window.confirm(`${opening}${scope}发送至 ${saved.base_url}，使用模型 ${saved.model} 提取截图信息。可能产生供应商费用。${boundary}确认您有权外传这些资料并继续？`)) return null;
         if (enable) {
             saved = await request("/api/model-settings/enable-external", {
                 method: "POST", body: { expected_revision: saved.revision, confirm_external: true },
@@ -2652,8 +2912,9 @@
             ["连接 / 识别验证", "未在此页面执行验证"],
         ], "配置存在不代表服务连接、识别准确率或授权范围已验证。demo 不识别图片内容。"));
         panel.append(configPanel("导入与证据", [
-            ["文件夹导入", config.inbox_enabled === true ? "已启用 · 仅处理已保存图片" : "未启用 · 手动上传"],
-            ["单次文件上限", Number.isInteger(config.max_upload_files) ? `${config.max_upload_files} 张` : "未知"],
+            ["文件夹导入", "已停用 · API 或页面上传"],
+            ["正式 API 文件上限", "每次 1 张 · 页面批选逐张提交"],
+            ["兼容离线演示文件上限", Number.isInteger(config.max_upload_files) ? `${config.max_upload_files} 张` : "未知"],
             ["单张文件上限", Number.isInteger(config.max_upload_bytes) ? `${config.max_upload_bytes} 字节` : "未知"],
             ["图片保留窗口", Number.isInteger(config.evidence_days) ? `${config.evidence_days} 天 · 不自动清理` : "未知"],
         ], "图片清理会同时删除对应候选及候选历史。正式订单与业务事件没有自动到期删除功能。"));
@@ -2750,17 +3011,30 @@
         clearTimeout(state.searchTimer);
         state.searchTimer = setTimeout(queryChanged, 250);
     });
+
+    byId("api-schema").addEventListener("click", loadAPISchema);
+    byId("results-search").addEventListener("input", () => {
+        clearTimeout(state.resultsSearchTimer);
+        state.resultsGeneration += 1;
+        state.resultsPage.offset = 0;
+        state.resultsSearchTimer = setTimeout(loadResults, 250);
+    });
+    for (const [id, direction] of [["results-previous", -1], ["results-next", 1]]) byId(id).addEventListener("click", () => {
+        state.resultsPage.offset = Math.max(0, state.resultsPage.offset + direction * state.resultsPage.limit);
+        void loadResults();
+    });
     byId("order-search").addEventListener("input", renderOrders);
     byId("order-filter").addEventListener("change", renderOrders);
     document.querySelector(".sidebar .brand").addEventListener("click", (event) => { event.preventDefault(); switchView("dashboard"); void refresh(true); });
-    for (const view of ["dashboard", "review", "orders", "exports", "settings"]) byId(`nav-${view}`).addEventListener("click", () => {
+    for (const view of ["dashboard", "results", "api", "review", "orders", "exports", "settings"]) byId(`nav-${view}`).addEventListener("click", () => {
         switchView(view);
         if (view === "review") showQueue();
         if (view === "dashboard") void refresh(true);
     });
     byId("orders-export").addEventListener("click", () => switchView("exports"));
-    byId("dashboard-review").addEventListener("click", () => { switchView("review"); showQueue(); });
+    byId("dashboard-review").addEventListener("click", () => switchView("results"));
     for (const [id, filter] of [["stat-review", "review_required"], ["stat-processing", "processing"], ["stat-failed", "failed"], ["stat-confirmed", "confirmed"]]) byId(id).addEventListener("click", () => {
+        if (id !== "stat-confirmed") { switchView("results"); return; }
         byId("queue-filter").value = filter;
         byId("queue-search").value = "";
         switchView("review"); showQueue(); queryChanged();
@@ -2797,7 +3071,7 @@
     byId("duplicate-checkbox").addEventListener("change", () => { byId("duplicate-confirm").disabled = !byId("duplicate-checkbox").checked; });
     byId("duplicate-cancel").addEventListener("click", () => closeDialog("duplicate-dialog"));
     byId("duplicate-confirm").addEventListener("click", () => { if (byId("duplicate-checkbox").checked && state.duplicate) void confirmTask(true, state.duplicate); });
-    for (const id of ["open-upload", "review-upload", "empty-upload"]) byId(id).addEventListener("click", openUpload);
+    for (const id of ["open-upload", "results-upload", "review-upload", "empty-upload"]) byId(id).addEventListener("click", openUpload);
     for (const id of ["close-upload", "cancel-upload"]) byId(id).addEventListener("click", () => closeDialog("upload-dialog"));
     byId("upload-files").addEventListener("change", showFiles);
     byId("upload-form").addEventListener("submit", upload);

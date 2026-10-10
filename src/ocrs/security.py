@@ -8,21 +8,35 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 class RequestGuard:
-    def __init__(self, app: ASGIApp, token: str, max_bytes: int):
+    def __init__(
+        self,
+        app: ASGIApp,
+        token: str,
+        max_bytes: int,
+        recognition_max_bytes: int | None = None,
+    ):
         self.app = app
         self.expected = ("Bearer " + token).encode()
         self.max_bytes = max_bytes
+        self.recognition_max_bytes = recognition_max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not scope["path"].startswith("/api/"):
             await self.app(scope, receive, send)
             return
         headers = dict(scope.get("headers", []))
+        max_bytes = (
+            self.recognition_max_bytes
+            if scope["path"] == "/api/recognitions" and self.recognition_max_bytes is not None
+            else self.max_bytes
+        )
         if not hmac.compare_digest(headers.get(b"authorization", b""), self.expected):
             await self._error(scope, receive, send, 401, "UNAUTHORIZED", "请输入本地访问令牌")
             return
         length = headers.get(b"content-length")
-        if length is not None and (not length.isdigit() or int(length) > self.max_bytes):
+        if length is not None and (
+            len(length) > 20 or not length.isdigit() or int(length) > max_bytes
+        ):
             await self._error(scope, receive, send, 413, "UPLOAD_TOO_LARGE", "请求过大")
             return
         # Bound chunked bodies before framework parsers can translate a size failure
@@ -35,7 +49,7 @@ class RequestGuard:
                     return
                 chunk = message.get("body", b"")
                 consumed += len(chunk)
-                if consumed > self.max_bytes:
+                if consumed > max_bytes:
                     await self._error(scope, receive, send, 413, "UPLOAD_TOO_LARGE", "请求过大")
                     return
                 body.write(chunk)
