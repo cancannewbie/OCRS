@@ -309,7 +309,7 @@ def test_schema_one_migration_preserves_facts_but_revokes_old_queue(tmp_path):
         )
     migrate(tmp_path)
     with connect(tmp_path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         task = db.execute("SELECT * FROM tasks").fetchone()
         assert task["model_revision"] == -1
         assert task["external_authorized"] == 0

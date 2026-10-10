@@ -5,6 +5,354 @@ const assert = require("node:assert/strict");
 const { setup, makeTask, makeEvent, makeOrder, json, deferred, flush } = require("./helpers.cjs");
 
 const confirmPath = "/api/tasks/task-1/confirm";
+const candidatePath = "/api/tasks/task-1/candidate";
+const reopenPath = "/api/tasks/task-1/reopen";
+
+function rejectedFixture(overrides = {}) {
+    return makeTask({ status: "rejected", review_history: [{ id: "audit-reject", kind: "rejected", actor: null, reason: "Synthetic original rejection", task_version: 1, from_status: "review_required", to_status: "rejected", created_at: "2026-10-09T00:00:00Z" }], ...overrides });
+}
+
+async function rejectedReady(t) {
+    const app = setup(t, { tasks: [rejectedFixture()] });
+    await app.login(); await app.select();
+    await app.click("edit-rejected-button");
+    return app;
+}
+
+test("queue selection is explicit, excludes unavailable tasks and edits only the frozen chosen sequence", async (t) => {
+    const tasks = [makeTask(), rejectedFixture({ id: "task-2" }), makeTask({ id: "task-3" }),
+        makeTask({ id: "task-confirmed", status: "confirmed" }),
+        rejectedFixture({ id: "task-no-candidate", candidate: null }),
+        rejectedFixture({ id: "task-expired", sources: [{ id: "source-expired", expired: true }] })];
+    const app = setup(t, { tasks });
+    await app.login(); await app.click("nav-review");
+    const checkbox = (id) => app.document.querySelector(`.task-select[data-task-id="${id}"]`);
+    assert.equal(checkbox("task-confirmed").disabled, true);
+    assert.equal(checkbox("task-no-candidate").disabled, true);
+    assert.equal(checkbox("task-expired").disabled, true);
+    checkbox("task-1").click(); await flush();
+    checkbox("task-3").click(); await flush();
+    assert.match(app.id("queue-selection-count").textContent, /已选 2 个.*当前页/);
+    assert.equal(app.id("queue-select-all").indeterminate, true);
+    assert.equal(app.document.querySelectorAll("#task-list tr.selected").length, 2);
+    await app.click("queue-edit-selected");
+    assert.match(app.id("detail-position").textContent, /选中 1 \/ 2/);
+    app.reviewer(); app.fill(app.field("客户"), "Synthetic first chosen correction");
+    await app.click("save-candidate-button");
+    assert.equal(app.server.tasks[1].version, 1);
+    assert.equal(app.server.tasks[2].version, 1);
+    await app.click("next-task");
+    assert.match(app.id("task-meta").textContent, /task-3/);
+    assert.match(app.id("detail-position").textContent, /选中 2 \/ 2/);
+    assert.equal(app.id("next-task").disabled, true);
+    assert.equal(app.calls("/api/tasks/task-2/candidate").length, 0);
+});
+
+test("manual refresh, search, filter and pagination clear current-page checkbox scope", async (t) => {
+    const tasks = Array.from({ length: 51 }, (_, index) => makeTask({ id: `task-page-${index + 1}` }));
+    const app = setup(t, { tasks });
+    await app.login(); await app.click("nav-review");
+    await app.click("queue-select-all");
+    assert.match(app.id("queue-selection-count").textContent, /已选 50 个/);
+    await app.click("queue-next-page");
+    assert.match(app.id("queue-selection-count").textContent, /已选 0 个/);
+    assert.equal(app.id("queue-select-all").checked, false);
+    await app.click("queue-select-all");
+    assert.match(app.id("queue-selection-count").textContent, /已选 1 个/);
+    await app.click("refresh-button");
+    assert.match(app.id("queue-selection-count").textContent, /已选 0 个/);
+    await app.click("queue-select-all");
+    app.fill(app.id("queue-search"), "task-page-51");
+    assert.match(app.id("queue-selection-count").textContent, /已选 0 个/);
+    assert.equal(app.id("queue-select-all").disabled, true);
+    await app.runTimers(250);
+    await app.click("queue-select-all");
+    app.fill(app.id("queue-filter"), "review_required"); await flush();
+    assert.match(app.id("queue-selection-count").textContent, /已选 0 个/);
+    assert.equal(app.id("queue-edit-selected").disabled, true);
+});
+
+test("old checkbox events and controls during pending queries cannot restore stale selection", async (t) => {
+    const app = setup(t, { tasks: [makeTask()] });
+    await app.login(); await app.click("nav-review");
+    const oldCheckbox = app.document.querySelector(".task-select");
+    const oldSelectAll = app.id("queue-select-all");
+    oldCheckbox.click(); await flush();
+    const result = deferred();
+    app.on("/api/tasks", () => result.promise);
+    app.fill(app.id("queue-filter"), "review_required"); await flush();
+    assert.equal(app.id("queue-select-all").disabled, true);
+    assert.equal(app.document.querySelector(".task-edit").disabled, true);
+    oldCheckbox.checked = true; app.dispatch(oldCheckbox, "change");
+    oldSelectAll.checked = true; app.dispatch(oldSelectAll, "change");
+    assert.match(app.id("queue-selection-count").textContent, /已选 0 个/);
+    result.resolve(json({ tasks: app.server.tasks, total: 1, limit: 50, offset: 0, has_more: false }));
+    await flush();
+    assert.equal(app.id("queue-select-all").disabled, false);
+    assert.equal(app.id("queue-select-all").checked, false);
+    assert.equal(app.document.querySelector(".task-select").checked, false);
+});
+
+test("a reopened rejected task leaving its filter does not break the remaining selected-task navigation", async (t) => {
+    const app = setup(t, { tasks: [rejectedFixture(), rejectedFixture({ id: "task-2" })] });
+    await app.login(); await app.click("nav-review");
+    app.fill(app.id("queue-filter"), "rejected"); await flush();
+    await app.click("queue-select-all"); await app.click("queue-edit-selected");
+    await app.click("reopen-button");
+    app.fill(app.id("reopen-actor"), "Synthetic reviewer");
+    app.fill(app.id("reopen-reason"), "Synthetic selected resubmission");
+    await app.submit("reopen-form");
+    assert.equal(app.server.tasks[0].status, "review_required");
+    assert.equal(app.id("next-task").disabled, false);
+    assert.match(app.id("detail-position").textContent, /选中 1 \/ 2/);
+    await app.click("next-task");
+    assert.match(app.id("task-meta").textContent, /task-2/);
+    assert.equal(app.field("客户").disabled, false);
+    assert.match(app.id("detail-position").textContent, /选中 2 \/ 2/);
+});
+
+test("a delayed post-save detail cannot replace a newer authoritative task already refreshed", async (t) => {
+    const app = await rejectedReady(t);
+    app.reviewer(); app.fill(app.field("客户"), "Synthetic submitted correction");
+    const stale = deferred();
+    app.on("/api/tasks/task-1", () => stale.promise);
+    app.id("save-candidate-button").click(); await flush();
+    assert.equal(app.server.tasks[0].version, 2);
+    const older = structuredClone(app.server.tasks[0]);
+    app.server.tasks[0].version = 3;
+    app.server.tasks[0].candidate.events[0].customer = "Synthetic newer authoritative correction";
+    await app.runTimers(4000);
+    stale.resolve(json(older)); await flush();
+    assert.match(app.id("task-meta").textContent, /v3/);
+    assert.equal(app.field("客户").value, "Synthetic newer authoritative correction");
+});
+
+test("rejected corrections save independently before explicit resubmission and preserve model evidence and audit", async (t) => {
+    const app = await rejectedReady(t);
+    const original = structuredClone(app.server.tasks[0].candidate);
+    const attempts = app.server.tasks[0].attempts;
+    app.reviewer();
+    app.fill(app.field("客户"), "Synthetic corrected customer");
+    app.fill(app.field("数量"), "3.125");
+    assert.equal(app.id("confirm-button").hidden, true);
+    assert.equal(app.id("reopen-button").disabled, true);
+    await app.click("save-candidate-button");
+    assert.equal(app.calls(candidatePath).length, 1);
+    const savedBody = JSON.parse(app.calls(candidatePath)[0].options.body);
+    assert.equal(savedBody.expected_version, 1);
+    assert.equal(savedBody.candidate.events[0].items[0].quantity, "3.125");
+    assert.deepEqual(savedBody.candidate.events[0].evidence, original.events[0].evidence);
+    assert.deepEqual(app.server.tasks[0].model_candidate, original);
+    assert.equal(app.server.tasks[0].status, "rejected");
+    assert.equal(app.server.tasks[0].version, 2);
+    assert.equal(app.id("reopen-button").disabled, false);
+    assert.match(app.id("task-review-history").textContent, /Synthetic original rejection/);
+    assert.match(app.id("task-review-history").textContent, /Synthetic verification/);
+    await app.click("reopen-button");
+    assert.equal(app.calls(reopenPath).length, 0);
+    assert.match(app.id("reopen-scope").textContent, /task-1.*v2/);
+    app.fill(app.id("reopen-reason"), "Synthetic resubmission reason");
+    await app.submit("reopen-form");
+    const reopenedBody = JSON.parse(app.calls(reopenPath)[0].options.body);
+    assert.equal(reopenedBody.expected_version, 2);
+    assert.equal(reopenedBody.reason, "Synthetic resubmission reason");
+    assert.equal(app.server.tasks[0].status, "review_required");
+    assert.equal(app.server.tasks[0].attempts, attempts);
+    assert.equal(app.calls("/api/tasks/task-1/retry").length, 0);
+    assert.equal(app.calls(confirmPath).length, 0);
+    assert.equal(app.calls("/api/export").length, 0);
+    assert.deepEqual(app.server.orders, []);
+    assert.match(app.id("task-review-history").textContent, /Synthetic original rejection/);
+    assert.match(app.id("task-review-history").textContent, /Synthetic resubmission reason/);
+});
+
+test("saving incomplete corrections keeps null fields and requires audit but no order confirmation validation", async (t) => {
+    const app = await rejectedReady(t);
+    app.fill(app.field("客户"), "");
+    app.fill(app.field("数量"), "");
+    await app.click("save-candidate-button");
+    assert.equal(app.calls(candidatePath).length, 0);
+    assert.match(app.id("notice-text").textContent, /审核人.*修订原因/);
+    app.reviewer();
+    await app.click("save-candidate-button");
+    assert.equal(app.calls(candidatePath).length, 1);
+    const body = JSON.parse(app.calls(candidatePath)[0].options.body);
+    assert.equal(body.candidate.events[0].customer, null);
+    assert.equal(body.candidate.events[0].items[0].quantity, null);
+    assert.equal(app.server.tasks[0].status, "rejected");
+});
+
+test("cancel edit and cancel resubmission write nothing and restore the last persisted correction", async (t) => {
+    const app = await rejectedReady(t);
+    app.reviewer(); app.fill(app.field("客户"), "Synthetic persisted correction");
+    await app.click("save-candidate-button");
+    app.fill(app.field("客户"), "Synthetic abandoned correction");
+    app.window.confirm = () => false;
+    await app.click("cancel-edit-button");
+    assert.equal(app.field("客户").value, "Synthetic abandoned correction");
+    app.window.confirm = () => true;
+    await app.click("cancel-edit-button");
+    assert.equal(app.field("客户").value, "Synthetic persisted correction");
+    assert.equal(app.field("客户").disabled, true);
+    await app.click("reopen-button");
+    app.fill(app.id("reopen-actor"), "Synthetic reviewer");
+    app.fill(app.id("reopen-reason"), "Synthetic cancelled resubmission");
+    await app.click("reopen-cancel");
+    assert.equal(app.calls(candidatePath).length, 1);
+    assert.equal(app.calls(reopenPath).length, 0);
+    assert.equal(app.server.tasks[0].status, "rejected");
+});
+
+test("candidate save and resubmission are single-flight and freeze audit fields while pending", async (t) => {
+    const app = await rejectedReady(t);
+    app.reviewer();
+    const saved = deferred();
+    app.on(candidatePath, () => saved.promise);
+    app.id("save-candidate-button").click();
+    app.id("save-candidate-button").click();
+    await flush();
+    assert.equal(app.calls(candidatePath).length, 1);
+    assert.equal(app.field("客户").disabled, true);
+    Object.assign(app.server.tasks[0], { version: 2 });
+    saved.resolve(json({ id: "task-1", status: "rejected", version: 2 }));
+    await flush();
+    await app.click("reopen-button");
+    const reopened = deferred();
+    app.on(reopenPath, () => reopened.promise);
+    app.submit("reopen-form"); app.submit("reopen-form");
+    await flush();
+    assert.equal(app.calls(reopenPath).length, 1);
+    assert.equal(app.id("reopen-actor").disabled, true);
+    assert.equal(app.id("reopen-reason").disabled, true);
+    assert.equal(app.dispatch(app.id("reopen-dialog"), "cancel"), false);
+    Object.assign(app.server.tasks[0], { status: "review_required", version: 3 });
+    reopened.resolve(json({ id: "task-1", status: "review_required", version: 3 }));
+    await flush();
+    assert.equal(app.id("reopen-dialog").open, false);
+    assert.equal(app.calls(confirmPath).length, 0);
+});
+
+test("unknown saved outcome replays a frozen body and key even after refresh sees the committed version", async (t) => {
+    const app = await rejectedReady(t);
+    app.reviewer(); app.fill(app.field("客户"), "Synthetic uncertain save");
+    app.on(candidatePath, ({ options }) => {
+        const body = JSON.parse(options.body);
+        Object.assign(app.server.tasks[0], { candidate: body.candidate, version: 2 });
+        throw new TypeError("Synthetic response loss");
+    });
+    await app.click("save-candidate-button");
+    assert.equal(app.id("version-warning").hidden, false);
+    assert.equal(app.id("save-candidate-button").disabled, false);
+    assert.equal(app.field("客户").value, "Synthetic uncertain save");
+    app.on(candidatePath, () => json({ id: "task-1", status: "rejected", version: 2 }));
+    await app.click("save-candidate-button");
+    const bodies = app.calls(candidatePath).map((call) => JSON.parse(call.options.body));
+    assert.deepEqual(bodies[1], bodies[0]);
+    assert.equal(app.id("version-warning").hidden, true);
+    assert.equal(app.server.tasks[0].version, 2);
+});
+
+test("unknown resubmission outcome replays its original key after the server has restored review", async (t) => {
+    const app = await rejectedReady(t);
+    await app.click("reopen-button");
+    app.fill(app.id("reopen-actor"), "Synthetic reviewer");
+    app.fill(app.id("reopen-reason"), "Synthetic uncertain reopen");
+    app.on(reopenPath, () => {
+        Object.assign(app.server.tasks[0], { status: "review_required", version: 2 });
+        throw new TypeError("Synthetic response loss");
+    });
+    await app.submit("reopen-form");
+    assert.equal(app.id("reopen-dialog").open, true);
+    assert.match(app.id("reopen-error").textContent, /结果未知/);
+    app.on(reopenPath, () => json({ id: "task-1", status: "review_required", version: 2 }));
+    await app.submit("reopen-form");
+    const bodies = app.calls(reopenPath).map((call) => JSON.parse(call.options.body));
+    assert.deepEqual(bodies[1], bodies[0]);
+    assert.equal(app.id("reopen-dialog").open, false);
+    assert.equal(app.calls(confirmPath).length, 0);
+});
+
+test("version and illegal-state conflicts preserve corrections until explicit reload", async (t) => {
+    const app = await rejectedReady(t);
+    app.reviewer(); app.fill(app.field("客户"), "Synthetic stale correction");
+    app.on(candidatePath, () => {
+        app.server.tasks[0].version = 2;
+        app.server.tasks[0].candidate.events[0].customer = "Synthetic concurrent correction";
+        return json({ error: { code: "VERSION_CONFLICT" } }, 409);
+    });
+    await app.click("save-candidate-button");
+    assert.equal(app.field("客户").value, "Synthetic stale correction");
+    assert.equal(app.id("save-candidate-button").disabled, true);
+    app.window.confirm = () => false;
+    await app.click("reload-task");
+    assert.equal(app.field("客户").value, "Synthetic stale correction");
+    app.window.confirm = () => true;
+    await app.click("reload-task");
+    assert.equal(app.field("客户").value, "Synthetic concurrent correction");
+    assert.equal(app.field("客户").disabled, false);
+    await app.click("reopen-button");
+    app.fill(app.id("reopen-actor"), "Synthetic reviewer");
+    app.fill(app.id("reopen-reason"), "Synthetic state conflict");
+    app.on(reopenPath, () => {
+        app.server.tasks[0].status = "confirmed";
+        app.server.tasks[0].version = 3;
+        return json({ error: { code: "STATE_CONFLICT" } }, 409);
+    });
+    await app.submit("reopen-form");
+    assert.match(app.id("reopen-error").textContent, /STATE_CONFLICT/);
+    await app.submit("reopen-form");
+    assert.equal(app.calls(reopenPath).length, 1);
+});
+
+test("polling preserves opened original evidence history and logout clears all sensitive review DOM", async (t) => {
+    const fixture = rejectedFixture({ model_candidate: { schema_version: "1", events: [makeEvent({ customer: "Synthetic original evidence value" })] } });
+    const app = setup(t, { tasks: [fixture] });
+    await app.login(); await app.select();
+    const snapshot = app.id("task-review-history").querySelector(".candidate-snapshot");
+    snapshot.open = true;
+    const history = app.id("task-review-history").firstChild;
+    await app.runTimers(4000);
+    assert.equal(app.id("task-review-history").firstChild, history);
+    assert.equal(snapshot.open, true);
+    await app.click("reopen-button");
+    app.fill(app.id("reopen-reason"), "Synthetic private reopening reason");
+    await app.click("logout-button");
+    assert.equal(app.id("task-review-history").textContent, "");
+    assert.equal(app.id("task-review-history").hidden, true);
+    assert.equal(app.id("reopen-scope").textContent, "");
+    assert.equal(app.id("reopen-reason").value, "");
+    await app.login(); await app.select();
+    app.server.unauthorized = true;
+    await app.click("refresh-button");
+    assert.equal(app.id("task-review-history").textContent, "");
+});
+
+test("history exposes complete immutable field and evidence snapshots as text, with explicit legacy audit gaps", async (t) => {
+    const unsafeText = '<img src="https://synthetic.invalid/pixel" onerror="window.syntheticHistoryExecuted=true">';
+    const candidate = { schema_version: "1", warnings: ["Synthetic candidate warning"], missing_reasons: ["Synthetic candidate missing reason"], events: [makeEvent({
+        action: "amend", customer: unsafeText, external_id: "Synthetic external order", occurred_at: "2026-10-09T01:02:03Z", target_order_id: "synthetic-target-order", expected_order_version: 7, reason: "Synthetic amendment reason",
+        items: [{ line_id: "synthetic-line", sku: "DEMO-001", name: unsafeText, quantity: "1.125", unit: "Synthetic unit", unit_price: "0.10" }],
+        evidence: [{ source_id: "synthetic-original-source", field: "customer", text: unsafeText }], warnings: ["Synthetic event warning"], missing_reasons: ["Synthetic event missing reason"],
+    })] };
+    const app = setup(t, { tasks: [rejectedFixture({ model_candidate: candidate, candidate_revisions: [{ version: 2, actor: "Synthetic editor", reason: "Synthetic revision", created_at: "2026-10-10T00:00:00Z", candidate }], review_history: [{ id: "legacy", kind: "rejected", reason: unsafeText }, { id: "new", kind: "review_reopened", actor: "Synthetic reviewer", reason: "Synthetic reopen", task_version: 3, from_status: "rejected", to_status: "review_required", created_at: "2026-10-10T00:00:00Z" }] })] });
+    await app.login(); await app.select();
+    const history = app.id("task-review-history");
+    for (const value of ["客户订单号", "Synthetic external order", "业务时间", "2026-10-09T01:02:03Z", "目标订单 ID", "synthetic-target-order", "目标订单版本", "7", "改单 / 撤单原因", "Synthetic amendment reason", "明细 ID", "synthetic-line", "1.125", "0.10", "证据来源 ID", "synthetic-original-source", "对应字段", "customer", "证据文本", unsafeText, "Synthetic candidate warning", "Synthetic candidate missing reason", "Synthetic event warning", "Synthetic event missing reason", "旧记录 · 版本未记录", "旧记录 · 状态变化未记录", "已驳回 → 待审核"])
+        assert.ok(history.textContent.includes(value), `History omitted ${value}`);
+    assert.equal(history.querySelectorAll("img, script, iframe, a").length, 0);
+    assert.equal(app.window.syntheticHistoryExecuted, undefined);
+});
+
+test("unavailable rejected evidence stays visibly read-only without editable or resubmission actions", async (t) => {
+    const app = setup(t, { tasks: [rejectedFixture({ sources: [{ id: "source-expired", filename: "synthetic-expired.png", source_label: "Synthetic source", expired: true }], candidate: null })] });
+    await app.login(); await app.select();
+    assert.match(app.id("editor-content").textContent, /原始证据已清理/);
+    assert.equal(app.id("edit-rejected-button").disabled, true);
+    assert.equal(app.id("reopen-button").disabled, true);
+    assert.equal(app.id("review-form").hidden, true);
+    assert.equal(app.calls(candidatePath).length, 0);
+    assert.equal(app.calls(reopenPath).length, 0);
+});
 
 async function ready(t, options) {
     const app = setup(t, options);
@@ -326,6 +674,26 @@ test("explicit version adoption changes only the expected version and retains in
     assert.equal(version.value, "4");
     assert.match(comparison(app).textContent, /本次提交版本 v4/);
     assert.doesNotMatch(comparison(app).textContent, /版本不一致/);
+    assert.equal(app.calls(confirmPath).length, 0);
+});
+
+test("rejected amendment editing can explicitly adopt the current target version without changing evidence or confirming", async (t) => {
+    const fixtures = orderChangeFixtures();
+    fixtures.tasks[0].status = "rejected";
+    const app = setup(t, fixtures);
+    await app.login(); await app.select(); await app.click("edit-rejected-button");
+    app.reviewer();
+    app.server.orders[0].version = 4;
+    await app.click("refresh-button");
+    assert.equal(useOrderVersion(app).disabled, false);
+    useOrderVersion(app).click(); await flush();
+    assert.equal(app.field("目标订单当前版本").value, "4");
+    assert.equal(app.field("明细 ID（已有明细保留）").value, "synthetic-line-original");
+    await app.click("save-candidate-button");
+    const body = JSON.parse(app.calls(candidatePath)[0].options.body);
+    assert.equal(body.candidate.events[0].expected_order_version, 4);
+    assert.equal(app.server.tasks[0].status, "rejected");
+    assert.equal(app.server.orders[0].version, 4);
     assert.equal(app.calls(confirmPath).length, 0);
 });
 

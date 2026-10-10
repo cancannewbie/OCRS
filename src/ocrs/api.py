@@ -30,7 +30,7 @@ from ocrs.model_settings import (
 )
 from ocrs.providers import OpenAICompatibleProvider, ProviderError
 from ocrs.security import RequestGuard
-from ocrs.service import AppError, Confirmation, Service
+from ocrs.service import AppError, CandidateRevision, Confirmation, ReviewReopen, Service
 from ocrs.storage import SCHEMA_VERSION, connect
 
 
@@ -351,6 +351,14 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     @app.post("/api/tasks/{task_id}/reject", dependencies=auth)
     def reject(task_id: str, body: RejectRequest) -> dict[str, Any]:
         return service.reject(task_id, body.expected_version, body.reason)
+
+    @app.put("/api/tasks/{task_id}/candidate", dependencies=auth)
+    def save_candidate(task_id: str, body: CandidateRevision) -> dict[str, Any]:
+        return service.save_candidate(task_id, body)
+
+    @app.post("/api/tasks/{task_id}/reopen", dependencies=auth)
+    def reopen_review(task_id: str, body: ReviewReopen) -> dict[str, Any]:
+        return service.reopen_review(task_id, body)
 
     @app.post("/api/tasks/{task_id}/confirm", dependencies=auth)
     def confirm(task_id: str, body: Confirmation) -> dict[str, Any]:

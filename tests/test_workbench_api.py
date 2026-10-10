@@ -42,7 +42,7 @@ def test_configuration_is_explicit_safe_allowlist(tmp_path: Path) -> None:
         assert response.headers["cache-control"] == "no-store"
         assert response.json() == {
             "version": __version__,
-            "schema_version": 2,
+            "schema_version": 3,
             "provider": "demo",
             "recognition_mode": "demo",
             "model_configured": False,

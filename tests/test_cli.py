@@ -64,7 +64,7 @@ def test_init_is_idempotent_and_token_is_private(
     invoke(monkeypatch, root, "token")
     assert capsys.readouterr().out.strip() == token
     with connect(root) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -89,7 +89,7 @@ def test_backup_restore_preserves_references_order_versions_and_replays_outbox(
     assert new.orders() == snapshot
     assert new.task(task["id"])["status"] == "confirmed"
     with connect(restored) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
         assert db.execute("SELECT count(*) FROM exports").fetchone()[0] == 0

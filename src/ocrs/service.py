@@ -13,11 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ocrs.capture import validate_image
 from ocrs.config import Settings
-from ocrs.domain import Candidate, CandidateEvent, validate_confirmation
+from ocrs.domain import Candidate, CandidateEvent, StrictModel, validate_confirmation
 from ocrs.exporter import ExportError, write_workbook
 from ocrs.model_settings import ModelSettingsStore, ModelSettingsUpdate
 from ocrs.providers import (
@@ -55,6 +55,28 @@ class Confirmation(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
     events: list[CandidateEvent] = Field(min_length=1, max_length=50)
     acknowledge_duplicates: bool = False
+
+
+class ReviewReopen(StrictModel):
+    """An explicit human review action bound to the current task version."""
+
+    expected_version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=100)
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("actor", "reason", "idempotency_key")
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("nonblank_required")
+        return value
+
+
+class CandidateRevision(ReviewReopen):
+    """Human corrections are drafts; saving never confirms or reopens a task."""
+
+    candidate: Candidate
 
 
 class Service:
@@ -292,7 +314,9 @@ class Service:
                     logger.error('{"error_code":"EVIDENCE_CLEANUP_PENDING"}')
             raise
 
-    def _task(self, db: sqlite3.Connection, task_id: str) -> dict[str, Any]:
+    def _task(
+        self, db: sqlite3.Connection, task_id: str, *, include_history: bool = False
+    ) -> dict[str, Any]:
         row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         if not row:
             raise AppError("NOT_FOUND", "任务不存在", 404)
@@ -306,11 +330,35 @@ class Service:
         )
         source["url"] = f"/api/sources/{source['id']}"
         result["sources"] = [source]
+        if include_history:
+            model = db.execute(
+                "SELECT candidate FROM candidate_history WHERE task_id=? ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            result["model_candidate"] = json.loads(model[0]) if model else None
+            result["candidate_revisions"] = [
+                {**dict(revision), "candidate": json.loads(revision["candidate"])}
+                for revision in db.execute(
+                    "SELECT version,actor,reason,created_at,candidate FROM candidate_revisions "
+                    "WHERE task_id=? ORDER BY version",
+                    (task_id,),
+                )
+            ]
+            result["review_history"] = [
+                dict(event)
+                for event in db.execute(
+                    "SELECT id,kind,actor,reason,created_at,task_version,from_status,to_status "
+                    "FROM audit WHERE record_id=? AND "
+                    "kind IN ('rejected','candidate_saved','review_reopened') ORDER BY id",
+                    (task_id,),
+                )
+            ]
         return result
 
     def task(self, task_id: str) -> dict[str, Any]:
         with connect(self.root) as db:
-            return self._task(db, task_id)
+            db.execute("BEGIN")
+            return self._task(db, task_id, include_history=True)
 
     def tasks(self) -> list[dict[str, Any]]:
         """Compatibility helper; HTTP callers use the explicitly paginated view."""
@@ -568,12 +616,89 @@ class Service:
             )
             db.execute(
                 (
-                    "INSERT INTO audit(kind,record_id,actor,reason,created_at) "
-                    "VALUES('rejected',?,'local-operator',?,?)"
+                    "INSERT INTO audit(kind,record_id,actor,reason,created_at,task_version,"
+                    "from_status,to_status) "
+                    "VALUES('rejected',?,'local-operator',?,?,?,?,'rejected')"
                 ),
-                (task_id, reason, now()),
+                (task_id, reason, now(), task["version"] + 1, task["status"]),
             )
             return self._task(db, task_id)
+
+    def save_candidate(self, task_id: str, request: CandidateRevision) -> dict[str, Any]:
+        """Save a separate human revision while preserving task state and model evidence."""
+        return self._review_mutation(task_id, request, reopen=False)
+
+    def reopen_review(self, task_id: str, request: ReviewReopen) -> dict[str, Any]:
+        """Return a rejected candidate to review without authorizing recognition or orders."""
+        return self._review_mutation(task_id, request, reopen=True)
+
+    def _review_mutation(
+        self, task_id: str, request: ReviewReopen, *, reopen: bool
+    ) -> dict[str, Any]:
+        kind = "review_reopened" if reopen else "candidate_saved"
+        payload_hash = hashlib.sha256(
+            encode(
+                {"task_id": task_id, "operation": kind, **request.model_dump(mode="json")}
+            ).encode()
+        ).hexdigest()
+        with transaction(self.root) as db:
+            prior = db.execute(
+                "SELECT * FROM requests WHERE key=?", (request.idempotency_key,)
+            ).fetchone()
+            if prior:
+                if prior["payload_hash"] != payload_hash:
+                    raise AppError("IDEMPOTENCY_CONFLICT", "同一请求标识对应不同内容", 409)
+                return json.loads(prior["response"])
+            if not request.actor.strip() or not request.reason.strip():
+                raise AppError("VALIDATION_ERROR", "操作者和原因不得为空白", 422)
+            task = self._task(db, task_id)
+            if task["version"] != request.expected_version:
+                raise AppError("VERSION_CONFLICT", "任务状态已改变，请刷新后重新核对", 409)
+            allowed = {"rejected"} if reopen else {"review_required", "rejected"}
+            if task["status"] not in allowed:
+                raise AppError("STATE_CONFLICT", "当前任务状态不允许此审核操作", 409)
+            if task["sources"][0]["expired"]:
+                raise AppError("EVIDENCE_EXPIRED", "原图已过期，不可编辑或重新发起审核", 409)
+            if task["candidate"] is None:
+                raise AppError("CANDIDATE_REQUIRED", "任务没有识别候选，无法重新审核", 409)
+            version, timestamp = task["version"] + 1, now()
+            status = "review_required" if reopen else task["status"]
+            if not reopen:
+                assert isinstance(request, CandidateRevision)
+                self._validate_evidence(request.candidate, {task["source_id"]})
+                candidate = request.candidate.model_dump_json()
+                db.execute(
+                    "INSERT INTO candidate_revisions(task_id,version,candidate,actor,reason,"
+                    "created_at) VALUES(?,?,?,?,?,?)",
+                    (task_id, version, candidate, request.actor, request.reason, timestamp),
+                )
+                db.execute("UPDATE tasks SET candidate=? WHERE id=?", (candidate, task_id))
+            db.execute(
+                "UPDATE tasks SET status=?,version=?,updated_at=? WHERE id=?",
+                (status, version, timestamp, task_id),
+            )
+            db.execute(
+                "INSERT INTO audit(kind,record_id,actor,reason,created_at,task_version,"
+                "from_status,to_status) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    kind,
+                    task_id,
+                    request.actor,
+                    request.reason,
+                    timestamp,
+                    version,
+                    task["status"],
+                    status,
+                ),
+            )
+            # A small receipt keeps sensitive candidate copies out of the durable
+            # idempotency cache; callers fetch current detail after success.
+            response = {"id": task_id, "status": status, "version": version}
+            db.execute(
+                "INSERT INTO requests VALUES(?,?,?)",
+                (request.idempotency_key, payload_hash, encode(response)),
+            )
+            return response
 
     def confirm(self, task_id: str, request: Confirmation) -> dict[str, Any]:
         payload_hash = hashlib.sha256(
