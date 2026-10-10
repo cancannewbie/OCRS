@@ -236,6 +236,10 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
     def save_model_configuration(body: ModelSettingsUpdate) -> dict[str, Any]:
         return service.save_model_settings(body)
 
+    @app.post("/api/model-settings/enable-external", dependencies=auth)
+    def enable_external_configuration(body: ModelTestRequest) -> dict[str, Any]:
+        return service.enable_external(body.expected_revision, body.confirm_external)
+
     @app.post("/api/model-settings/test", dependencies=auth)
     def test_model_configuration(body: ModelTestRequest) -> dict[str, Any]:
         # Save/GET never calls the provider; this explicit request uses only an
@@ -251,16 +255,18 @@ def create_app(settings: Settings, *, start_worker: bool = True) -> FastAPI:
             provider = service.model_provider(runtime, revision)
         assert isinstance(provider, OpenAICompatibleProvider)
         passed = False
+        failure_code = None
         try:
             provider.test_connection()
             passed = True
-        except ProviderError:
-            pass
+        except ProviderError as exc:
+            failure_code = exc.code
         except Exception:
             # Neither arbitrary transport exception messages nor model bodies
             # are allowed into HTTP errors, diagnostics or logs.
-            pass
+            failure_code = "RECOGNITION_INTERNAL"
         result = model_store.record_test(revision, passed).public()
+        result["test_error_code"] = failure_code
         result["test_message"] = (
             "合成图片测试成功；不代表真实订单识别准确率"
             if passed

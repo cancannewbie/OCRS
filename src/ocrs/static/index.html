@@ -869,7 +869,7 @@
                                 </fieldset>
                                 <p id="model-settings-error" class="form-error" role="alert" tabindex="-1" hidden></p>
                                 <p id="model-settings-result" role="status" class="muted"></p>
-                                <div class="model-settings-actions"><button id="model-save" class="button primary" type="submit" disabled>保存配置</button><button id="model-reset" class="button secondary" type="button" disabled>放弃修改 / 重新读取</button><button id="model-test" class="button secondary" type="button" disabled>测试已保存配置</button></div>
+                                <div class="model-settings-actions"><button id="model-save" class="button primary" type="submit" disabled>保存配置</button><button id="model-reset" class="button secondary" type="button" disabled>放弃修改 / 重新读取</button><button id="model-test" class="button secondary" type="button" disabled>合成图片识别测试</button></div>
                             </form>
                         </section>
                         <div id="settings-config" class="settings-config">
@@ -946,7 +946,7 @@
                     </button>
                 </div>
                 <p class="muted">
-                    每张截图建立一条任务，可包含多笔订单。仅导入你有权处理的资料。
+                    每张截图建立一条任务，可包含多笔订单。仅导入你有权处理的资料。点击上传后会显示当前模型、目的地与费用提示；尚未开启外部调用时，可在此一并明确开启，无需重新选图。
                 </p>
                 <p id="upload-mode-note" class="inline-warning" hidden>
                     当前为 demo 模式：不会读取图中文字，只返回虚构候选。请使用完全虚构的图片。
@@ -1104,9 +1104,9 @@
             </div>
         </dialog>
         <dialog id="model-test-dialog" class="modal" aria-labelledby="model-test-title">
-            <h2 id="model-test-title">确认发送虚构测试内容？</h2>
+            <h2 id="model-test-title">确认发送合成测试图片？</h2>
             <p id="model-test-destination" class="config-note"></p>
-            <p>仅发送系统生成的虚构测试内容，不读取截图、订单或客户资料。调用可能产生供应商费用。测试通过只说明此次请求通过，不代表 OCR 准确率或所有图片均受支持。</p>
+            <p>仅发送系统生成的虚构订单图片与候选 schema，不读取截图、订单或客户资料。调用可能产生供应商费用。测试通过只说明此次请求通过，不代表 OCR 准确率或所有图片均受支持。</p>
             <p id="model-test-error" class="form-error" role="alert" tabindex="-1" hidden></p>
             <div class="modal-actions"><button id="model-test-cancel" class="button secondary" type="button">取消</button><button id="model-test-confirm" class="button primary" type="button">同意发送并测试</button></div>
         </dialog>

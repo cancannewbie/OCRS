@@ -553,7 +553,7 @@ test("test requires saved enabled configuration and separate destination and cos
     assert.equal(app.id("model-test-dialog").open, true);
     assert.equal(app.document.activeElement, app.id("model-test-cancel"));
     assert.match(app.id("model-test-dialog").textContent, /models.example.com/);
-    assert.match(app.id("model-test-dialog").textContent, /虚构测试内容/);
+    assert.match(app.id("model-test-dialog").textContent, /虚构订单图片与候选 schema/);
     assert.match(app.id("model-test-dialog").textContent, /费用/);
     assert.equal(app.calls("/api/model-settings/test").length, 0);
     await app.click("model-test-cancel");
@@ -640,4 +640,87 @@ test("advanced limits are editable, transmitted as integers and retained after s
     assert.equal(body.timeout_seconds, 30); assert.equal(body.total_timeout_seconds, 90);
     assert.equal(body.max_output_tokens, 2048); assert.equal(body.max_requests, 20);
     assert.equal(app.id("model-timeout").value, "30"); assert.equal(app.id("model-max-requests").value, "20");
+});
+
+test("disabled external calls can be explicitly enabled with this batch, without losing files", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    app.id("model-allow-external").checked = false;
+    await app.submit("model-settings-form");
+    await app.click("open-upload"); const files = app.files();
+    app.fill(app.id("source-label"), "synthetic-current-batch");
+    const prompts = [];
+    app.window.confirm = (message) => { prompts.push(message); return false; };
+    await app.submit("upload-form");
+    assert.equal(app.calls("/api/model-settings/enable-external").length, 0);
+    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.id("upload-files").files[0], files[0]);
+    assert.match(prompts[0], /开启此外部模型调用.*1 张完整截图.*models.example.com.*synthetic-vision-model/);
+    assert.match(prompts[0], /费用.*其他图片仍须另行确认.*旧队列/);
+    app.window.confirm = (message) => { prompts.push(message); return true; };
+    await app.submit("upload-form");
+    assert.equal(prompts.length, 2, "only one confirmation per attempt");
+    assert.deepEqual(JSON.parse(app.calls("/api/model-settings/enable-external")[0].options.body), { expected_revision: 1, confirm_external: true });
+    const body = app.calls("/api/uploads")[0].options.body;
+    assert.equal(body.get("config_revision"), "2");
+    assert.equal(body.get("confirm_external"), "true");
+    assert.equal(body.get("source_label"), "synthetic-current-batch");
+    assert.equal(app.id("model-api-key").value, "");
+});
+
+test("a changed destination during in-place enable sends no image and retains draft", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    app.id("model-allow-external").checked = false; await app.submit("model-settings-form");
+    await app.click("open-upload"); const files = app.files();
+    app.on("/api/model-settings/enable-external", () => json({ error: { code: "MODEL_SETTINGS_CONFLICT" } }, 409));
+    await app.submit("upload-form");
+    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.id("upload-files").files[0], files[0]);
+    assert.match(app.id("upload-error").textContent, /配置已被其他页面更新/);
+    assert.equal(app.id("upload-submit").disabled, false);
+});
+
+test("late enable reply cannot upload files in a new login session", async (t) => {
+    const app = setup(t); await settings(app); configureModel(app);
+    app.id("model-allow-external").checked = false; await app.submit("model-settings-form");
+    await app.click("open-upload"); app.files();
+    const pending = deferred(); app.on("/api/model-settings/enable-external", () => pending.promise);
+    app.dispatch(app.id("upload-form"), "submit"); await flush();
+    await app.click("logout-button"); await app.login();
+    pending.resolve(json({ ...app.server.modelSettings, allow_external: true, revision: 2 })); await flush();
+    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.id("model-api-key").value, "");
+});
+
+test("incomplete external configuration does not ask or enable and preserves selected image", async (t) => {
+    const app = setup(t); await settings(app);
+    app.server.modelSettings = { ...app.server.modelSettings, provider: "openai-compatible", status: "not_configured" };
+    let prompts = 0; app.window.confirm = () => { prompts++; return true; };
+    await app.click("open-upload"); const files = app.files(); await app.submit("upload-form");
+    assert.equal(prompts, 0);
+    assert.equal(app.calls("/api/model-settings/enable-external").length, 0);
+    assert.equal(app.calls("/api/uploads").length, 0);
+    assert.equal(app.id("upload-files").files[0], files[0]);
+    assert.match(app.id("upload-error").textContent, /模型设置.*已选图片会保留/);
+});
+
+test("provider failure exposes an actionable safe explanation without raw response", async (t) => {
+    const app = setup(t, { tasks: [makeTask({ status: "failed", candidate: null, error_code: "provider_http_rejected" })] });
+    await app.login(); await app.select();
+    assert.match(app.document.querySelector(".task-description").textContent, /供应商不接受此图片或结构化请求/);
+});
+
+test("regenerating Excel locks old ready download even across status refresh and repeated events", async (t) => {
+    const app = setup(t); app.server.exportStatus = "completed"; await app.login();
+    assert.equal(app.id("download-button").disabled, false);
+    const pending = deferred(); app.on("/api/export", () => pending.promise);
+    app.id("export-button").click(); await flush();
+    assert.equal(app.id("download-button").disabled, true);
+    app.dispatch(app.id("download-button"), "click");
+    await app.click("refresh-button");
+    assert.equal(app.id("download-button").disabled, true);
+    assert.equal(app.calls("/api/export/download").length, 0);
+    pending.resolve(json({ status: "completed" })); await flush();
+    assert.equal(app.id("download-button").disabled, false);
+    await app.click("download-button");
+    assert.equal(app.calls("/api/export/download").length, 1);
 });

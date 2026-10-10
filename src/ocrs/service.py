@@ -115,6 +115,41 @@ class Service:
                 )
             return saved.public()
 
+    def enable_external(self, expected_revision: int, confirm_external: bool) -> dict[str, Any]:
+        """Explicitly enable the current destination, never authorize queued evidence."""
+        assert self.model_store is not None
+        with self._model_lock:
+            if not confirm_external:
+                raise AppError("MODEL_CONSENT_REQUIRED", "请明确确认开启外部调用", 409)
+            current = self.model_store.public()
+            if current["revision"] != expected_revision:
+                raise AppError("MODEL_SETTINGS_CONFLICT", "配置已改变，请重新核对目的地", 409)
+            if current["provider"] == "demo" or current["status"] != "configured":
+                raise AppError("PROVIDER_NOT_CONFIGURED", "请先保存完整的真实模型配置", 409)
+            if current["allow_external"]:
+                return current
+            # Copy only public configuration fields; keep ciphertext server-side.
+            fields = {
+                name: current[name]
+                for name in (
+                    "provider",
+                    "model",
+                    "base_url",
+                    "timeout_seconds",
+                    "total_timeout_seconds",
+                    "max_output_tokens",
+                    "max_requests",
+                )
+            }
+            return self.save_model_settings(
+                ModelSettingsUpdate(
+                    expected_revision=expected_revision,
+                    allow_external=True,
+                    api_key_action="keep",
+                    **fields,
+                )
+            )
+
     def _authorize_model(
         self, config_revision: int | None, confirm_external: bool
     ) -> tuple[Settings, int]:

@@ -51,7 +51,28 @@
         MODEL_SETTINGS_CONFLICT: "模型配置已被其他页面更新。请重新读取后核对；当前输入暂留此页面。",
         MODEL_SETTINGS_INVALID: "模型设置不合法，请核对地址、模型和密钥操作。",
         MODEL_TEST_FAILED: "模型测试未成功，请检查模型、密钥和服务地址后再试。",
-        PROVIDER_NOT_CONFIGURED: "真实模型尚未配置，请检查本机配置。",
+        PROVIDER_NOT_CONFIGURED: "真实模型尚未配置完整，请在“模型设置”保存支持图片输入的模型和密钥。已选图片会保留。",
+        MODEL_CONSENT_REQUIRED: "模型目的地或本次图片尚未授权，请重新核对并确认。",
+        MODEL_CONFIG_CHANGED: "配置已改变，旧任务已暂停。请核对当前目的地后点击重新识别。",
+        MODEL_DISABLED: "外部调用已关闭或模型配置不完整，请检查模型设置。",
+        MODEL_CONFIG_INVALID: "模型配置无法使用，请重新保存模型设置。",
+        INTERRUPTED: "服务上次中断，识别结果未知。原图已保留，可手动重新识别。",
+        RECOGNITION_INTERNAL: "本机识别处理失败，原图已保留。请重试或检查本机服务。",
+        provider_auth_failed: "供应商拒绝凭据或权限。请在模型设置核对密钥、账户额度及模型权限。",
+        provider_http_rejected: "供应商不接受此图片或结构化请求。请核对模型是否支持图像输入和 JSON schema，以及服务地址。",
+        provider_api_rejected: "供应商拒绝请求，请核对模型能力、权限和配置。",
+        provider_schema_invalid: "模型返回的 JSON 或候选结构无效，未生成正式订单。可换用支持结构化识图的模型后重试。",
+        provider_truncated: "模型输出被截断。请减少图片内容或在模型设置提高输出上限后重试。",
+        provider_refused: "模型拒绝识别此图片，请核对图片内容或更换适合的模型。",
+        provider_timeout: "模型服务响应超时。原图已保留，可稍后手动重试；供应商仍可能已计费。",
+        provider_deadline: "识别达到总超时上限。请检查网络或调整超时后手动重试；供应商仍可能已计费。",
+        provider_network_error: "无法连接模型服务，请检查网络和服务地址后重试。",
+        provider_rate_limited: "模型服务限流，请稍后手动重试。",
+        provider_unavailable: "模型服务暂不可用，请稍后手动重试。",
+        provider_retry_deferred: "供应商要求等待，已停止自动重试。请稍后手动重试。",
+        provider_request_budget: "已达到本次服务运行的模型请求上限，请核对预算与模型设置。",
+        provider_evidence_invalid: "模型返回的证据引用无效，已拒绝结果。可手动重试。",
+        provider_response_limit: "模型响应超过安全大小上限，已拒绝结果。请缩小图片内容。",
         TRANSMISSION_NOT_ALLOWED: "尚未明确允许向外部模型发送资料。",
     };
     const state = {
@@ -577,7 +598,7 @@
             exportState.status === "failed",
         );
         byId("download-button").disabled =
-            state.operations.has("download") ||
+            state.operations.has("download") || state.operations.has("export") ||
             !["ready", "succeeded", "success", "completed"].includes(
                 exportState.status,
             );
@@ -1011,7 +1032,7 @@
             if (isProcessing(task.status)) {
                 description.append(
                     element("div", "pending-icon"),
-                    element("strong", "", "正在准备识别候选"),
+                    element("strong", "", task.status === "received" ? "已入队，等待模型识别" : "模型正在识别图片"),
                     element(
                         "p",
                         "",
@@ -1029,7 +1050,7 @@
                 );
                 if (task.error_code)
                     description.append(
-                        element("p", "error-code", safeCode(task.error_code)),
+                        element("p", "error-code", errorText({ code: task.error_code })),
                     );
                 actions.append(
                     actionButton("重新识别", "primary", () => retryTask(task)),
@@ -1879,7 +1900,7 @@
         if (state.operations.has("export")) return;
         const epoch = state.epoch;
         state.operations.add("export");
-        byId("export-button").disabled = true;
+        renderStatus();
         try {
             await request("/api/export", { method: "POST", body: {} });
             if (epoch !== state.epoch) return;
@@ -1896,7 +1917,7 @@
     }
 
     async function downloadExport() {
-        if (state.operations.has("download")) return;
+        if (state.operations.has("download") || state.operations.has("export")) return;
         const epoch = state.epoch;
         state.operations.add("download");
         byId("download-button").disabled = true;
@@ -2031,7 +2052,7 @@
         const labels = { demo: "Demo · 不执行 OCR", not_configured: "尚未配置完整", configured: "已配置 · 未验证识别" };
         byId("model-settings-state").textContent = labels[saved.status] || "配置状态未知";
         byId("model-settings-result").textContent = saved.test_status === "passed" ? "测试成功：仅验证本次虚构请求，不代表真实 OCR 准确率。"
-            : saved.test_status === "failed" ? "上次测试失败；请检查配置后手动重试。" : "尚未测试。保存配置不会调用外部模型。";
+            : saved.test_status === "failed" ? `上次测试失败；${saved.test_error_code ? errorText({ code: saved.test_error_code }) : "请检查配置后手动重试。"}` : "尚未测试。保存配置不会调用外部模型。";
         updateModelControls();
     }
 
@@ -2144,13 +2165,26 @@
     }
 
     async function authorizeRecognition(scope) {
-        const saved = await request("/api/model-settings");
+        const epoch = state.epoch;
+        let saved = await request("/api/model-settings");
+        if (epoch !== state.epoch) return null;
         if (saved.provider === "demo") return {};
         if (saved.status !== "configured") throw makeError("PROVIDER_NOT_CONFIGURED");
-        if (!saved.allow_external) throw makeError("TRANSMISSION_NOT_ALLOWED");
-        // Native confirmation names the exact saved destination and data scope.
-        // The server binds the consent to this revision and rejects a stale one.
-        if (!window.confirm(`将${scope}发送至 ${saved.base_url}，使用模型 ${saved.model} 识别订单。可能产生费用。确认您有权外传这些资料并继续？`)) return null;
+        const enable = !saved.allow_external;
+        const opening = enable ? "开启此外部模型调用，并将" : "将";
+        const boundary = enable ? "这会保存开启状态；其他图片仍须另行确认，不会自动发送旧队列。可在模型设置关闭。" : "";
+        if (!window.confirm(`${opening}${scope}发送至 ${saved.base_url}，使用模型 ${saved.model} 识别订单。可能产生供应商费用。${boundary}确认您有权外传这些资料并继续？`)) return null;
+        if (enable) {
+            saved = await request("/api/model-settings/enable-external", {
+                method: "POST", body: { expected_revision: saved.revision, confirm_external: true },
+            });
+            if (epoch !== state.epoch) return null;
+            if (!state.modelSettingsDirty) {
+                state.modelSettings = saved;
+                renderModelSettings();
+            }
+            state.config = null;
+        }
         return { config_revision: saved.revision, confirm_external: true };
     }
 

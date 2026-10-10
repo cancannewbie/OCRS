@@ -137,20 +137,19 @@ test("validation and revision conflict preserve changes; navigation cancellation
 });
 
 test("failed synthetic probe stays explicit and does not claim OCR validation", async ({ page }) => {
-    await fillModel(page); await save(page);
+    await fillModel(page);
+    await page.locator("#model-name").fill("synthetic-invalid-json");
+    await save(page);
     let probes = 0;
-    await page.route("**/api/model-settings/test", async (route) => {
-        probes += 1;
-        const response = await page.request.get(API, { headers: AUTH });
-        const current = await response.json();
-        await route.fulfill({ json: { ...current, test_status: "failed", test_message: "synthetic ignored provider details" } });
+    page.on("request", (request) => {
+        if (new URL(request.url()).pathname === `${API}/test`) probes += 1;
     });
     await page.locator("#model-test").click();
     await page.locator("#model-test-confirm").click();
     await expect(page.locator("#model-settings-result")).toContainText("测试失败");
     await expect(page.locator("#model-settings-result")).not.toContainText("测试成功");
     await expect(page.locator("#model-test-dialog")).not.toBeVisible();
-    await expect(page.locator("body")).not.toContainText("synthetic ignored provider details");
+    await expect(page.locator("body")).not.toContainText("synthetic malformed candidate");
     expect(probes).toBe(1);
     await expect(page.locator("#model-test")).toBeEnabled();
 });
