@@ -159,7 +159,15 @@ test("configured image flow enables external in place, reviews evidence and expo
     await expect(page.locator("#task-status")).toHaveText("已确认");
     expect(await orderCount(request)).toBe(before + 1);
     await page.locator("#nav-exports").click();
+    // An older export may already be ready. Wait for this generation request,
+    // not merely an enabled download control backed by that previous snapshot.
+    const exportReady = page.waitForResponse((response) =>
+        response.url().endsWith("/api/export") && response.request().method() === "POST",
+    );
     await page.locator("#export-button").click();
+    const generated = await exportReady;
+    expect(generated.ok()).toBeTruthy();
+    expect((await generated.json()).status).toBe("completed");
     await expect(page.locator("#download-button")).toBeEnabled();
     const downloadReady = page.waitForEvent("download");
     await page.locator("#download-button").click();

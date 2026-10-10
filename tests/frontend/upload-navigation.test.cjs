@@ -708,3 +708,19 @@ test("provider failure exposes an actionable safe explanation without raw respon
     await app.login(); await app.select();
     assert.match(app.document.querySelector(".task-description").textContent, /供应商不接受此图片或结构化请求/);
 });
+
+test("regenerating Excel locks old ready download even across status refresh and repeated events", async (t) => {
+    const app = setup(t); app.server.exportStatus = "completed"; await app.login();
+    assert.equal(app.id("download-button").disabled, false);
+    const pending = deferred(); app.on("/api/export", () => pending.promise);
+    app.id("export-button").click(); await flush();
+    assert.equal(app.id("download-button").disabled, true);
+    app.dispatch(app.id("download-button"), "click");
+    await app.click("refresh-button");
+    assert.equal(app.id("download-button").disabled, true);
+    assert.equal(app.calls("/api/export/download").length, 0);
+    pending.resolve(json({ status: "completed" })); await flush();
+    assert.equal(app.id("download-button").disabled, false);
+    await app.click("download-button");
+    assert.equal(app.calls("/api/export/download").length, 1);
+});

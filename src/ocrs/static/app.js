@@ -598,7 +598,7 @@
             exportState.status === "failed",
         );
         byId("download-button").disabled =
-            state.operations.has("download") ||
+            state.operations.has("download") || state.operations.has("export") ||
             !["ready", "succeeded", "success", "completed"].includes(
                 exportState.status,
             );
@@ -1900,7 +1900,7 @@
         if (state.operations.has("export")) return;
         const epoch = state.epoch;
         state.operations.add("export");
-        byId("export-button").disabled = true;
+        renderStatus();
         try {
             await request("/api/export", { method: "POST", body: {} });
             if (epoch !== state.epoch) return;
@@ -1917,7 +1917,7 @@
     }
 
     async function downloadExport() {
-        if (state.operations.has("download")) return;
+        if (state.operations.has("download") || state.operations.has("export")) return;
         const epoch = state.epoch;
         state.operations.add("download");
         byId("download-button").disabled = true;
