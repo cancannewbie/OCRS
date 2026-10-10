@@ -198,6 +198,14 @@ function setup(t, options = {}) {
             }
             return json(copy(server.modelSettings));
         }
+        if (entry.path === "/api/model-settings/enable-external") {
+            const body = JSON.parse(fetchOptions.body);
+            if (!body.confirm_external || body.expected_revision !== server.modelSettings.revision)
+                return json({ error: { code: "MODEL_SETTINGS_CONFLICT" } }, 409);
+            if (!server.modelSettings.allow_external)
+                server.modelSettings = { ...server.modelSettings, allow_external: true, revision: server.modelSettings.revision + 1, test_status: "not_tested" };
+            return json(copy(server.modelSettings));
+        }
         if (entry.path === "/api/model-settings/test") {
             server.modelSettings.test_status = "passed";
             return json(copy(server.modelSettings));

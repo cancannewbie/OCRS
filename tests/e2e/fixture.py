@@ -72,8 +72,10 @@ def verify_export(path: Path, customer: str, external_id: str, item_name: str) -
         assert order["currency"].value == "CNY"
         assert order["items_total_exact"].value == "31.00"
         assert all(
-            row["customer"].value != "DEMO ONLY — fictional customer" for row in order_rows
-        ), "The unconfirmed demo candidate must not leak into the workbook."
+            row["customer"].value
+            not in {"DEMO ONLY — fictional customer", "SYNTHETIC Vision Buyer"}
+            for row in order_rows
+        ), "Unconfirmed demo or network-fixture candidates must not leak into the workbook."
         lines = [row for row in item_rows if row["order_id"].value == order["order_id"].value]
         assert len(lines) == 1
         line = lines[0]
