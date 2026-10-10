@@ -129,6 +129,70 @@
         return node;
     }
 
+    function icon(name) {
+        const paths = {
+            "arrow-right": "M4 10h12m-5-5 5 5-5 5",
+            "external-link": "M11 3h6v6 M17 3l-8 8 M8 3H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4",
+        };
+        if (!Object.hasOwn(paths, name)) return null;
+        const node = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        for (const [attribute, value] of Object.entries({
+            class: `ui-icon${name === "arrow-right" ? " icon-directional" : ""}`, viewBox: "0 0 20 20", fill: "none",
+            stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round",
+            "stroke-linejoin": "round", "aria-hidden": "true", focusable: "false",
+        })) node.setAttribute(attribute, value);
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", paths[name]);
+        path.setAttribute("vector-effect", "non-scaling-stroke");
+        node.append(path);
+        return node;
+    }
+
+    const busyButtonContent = new Map();
+
+    function setBusy(id, busy) {
+        byId(id)?.setAttribute("aria-busy", String(busy));
+    }
+
+    function setButtonBusy(id, busy, label) {
+        const button = byId(id);
+        if (!button) return;
+        setBusy(id, busy);
+        const saved = busyButtonContent.get(id);
+        if (busy) {
+            if (!saved || saved.button !== button)
+                busyButtonContent.set(id, { button, children: Array.from(button.childNodes) });
+            if (label) button.replaceChildren(element("span", "button-label", label));
+        } else {
+            if (saved?.button === button) button.replaceChildren(...saved.children);
+            busyButtonContent.delete(id);
+        }
+    }
+
+    function resetBusyFeedback() {
+        for (const [id, saved] of busyButtonContent) {
+            saved.button.replaceChildren(...saved.children);
+            setBusy(id, false);
+        }
+        busyButtonContent.clear();
+        for (const node of document.querySelectorAll('[aria-busy="true"]'))
+            node.setAttribute("aria-busy", "false");
+    }
+
+    function restoreDialogFocus(target) {
+        if (!target || !state.token || document.querySelector("dialog[open]")) return;
+        const available = (node) => node?.isConnected && !node.matches(":disabled") &&
+            !node.closest("[hidden], [inert], dialog:not([open])");
+        if (available(target)) { target.focus(); return; }
+        const back = byId("back-to-queue");
+        const fallback = state.view === "review" && state.reviewDetail && available(back)
+            ? back : byId("main-content");
+        if (available(fallback)) {
+            if (!fallback.hasAttribute("tabindex")) fallback.tabIndex = -1;
+            fallback.focus();
+        }
+    }
+
     function readToken() {
         try {
             return sessionStorage.getItem(TOKEN_KEY) || "";
@@ -370,6 +434,7 @@
         state.historyGeneration += 1;
         state.drafts.clear();
         state.operations.clear();
+        resetBusyFeedback();
         state.duplicate = null;
         state.confirmTarget = null;
         state.rejectTarget = null;
@@ -403,7 +468,7 @@
         byId("notice").hidden = true;
         byId("load-error").hidden = true;
         byId("login-button").disabled = false;
-        byId("login-button").textContent = "进入工作台 →";
+        byId("login-button").replaceChildren(element("span", "button-label", "进入工作台"), icon("arrow-right"));
         byId("access-token").focus();
     }
 
@@ -412,7 +477,8 @@
         state.operations.add("login");
         const epoch = state.epoch;
         byId("login-button").disabled = true;
-        byId("login-button").textContent = "正在验证…";
+        setBusy("login-form", true);
+        setButtonBusy("login-button", true, "正在验证…");
         byId("login-error").hidden = true;
         try {
             const status = await request("/api/status", { token });
@@ -436,7 +502,8 @@
             if (epoch !== state.epoch) return;
             state.operations.delete("login");
             byId("login-button").disabled = false;
-            byId("login-button").textContent = "进入工作台 →";
+            setBusy("login-form", false);
+            setButtonBusy("login-button", false);
         }
     }
 
@@ -468,7 +535,10 @@
         const generation = state.queryGeneration;
         const selectedId = state.selectedId;
         const run = async () => {
-            if (!silent) byId("refresh-button").disabled = true;
+            if (!silent) {
+                byId("refresh-button").disabled = true;
+                setButtonBusy("refresh-button", true, "正在同步…");
+            }
             byId("task-list").setAttribute("aria-busy", "true");
             try {
                 const [status, taskData, orderData, selected, attention] = await Promise.all([
@@ -519,6 +589,7 @@
             } finally {
                 if (epoch === state.epoch) {
                     byId("refresh-button").disabled = false;
+                    setButtonBusy("refresh-button", false);
                     byId("task-list").setAttribute("aria-busy", "false");
                 }
             }
@@ -617,6 +688,8 @@
                 exportState.status,
             );
         byId("export-button").disabled = state.operations.has("export");
+        setButtonBusy("export-button", state.operations.has("export"), "正在生成…");
+        setButtonBusy("download-button", state.operations.has("download"), "正在下载…");
         const confirmed = state.orders.filter((order) => ["confirmed", "active"].includes(order.status)).length;
         const cancelled = state.orders.filter((order) => ["cancelled", "canceled"].includes(order.status)).length;
         byId("export-scope").textContent = `当前正式订单 ${state.orders.length} 笔 · 有效 ${confirmed} 笔 · 已撤单 ${cancelled} 笔`;
@@ -730,7 +803,9 @@
                 }
                 renderQueue(); byId("queue-select-all")?.focus();
             });
-            selectionHead.append(selectAll); headings.append(selectionHead);
+            const selectAllTarget = element("label", "selection-target");
+            selectAllTarget.append(selectAll);
+            selectionHead.append(selectAllTarget); headings.append(selectionHead);
             for (const title of ["任务 / 客户", "来源", "候选动作", "处理状态", "导入时间", "操作"]) {
                 const th = element("th", "", title); th.scope = "col"; headings.append(th);
             }
@@ -750,7 +825,9 @@
                     else state.checkedIds.delete(task.id);
                     renderQueue();
                 });
-                selection.append(checkbox);
+                const selectionTarget = element("label", "selection-target");
+                selectionTarget.append(checkbox);
+                selection.append(selectionTarget);
                 const titleCell = element("td");
                 const title = task.candidate?.events?.[0]?.customer || task.sources?.[0]?.filename || "截图识别任务";
                 const button = element("button", `task-card${task.id === state.selectedId ? " active" : ""}`, title);
@@ -992,7 +1069,8 @@
                 image.alt = `原始截图 ${index + 1}：${source.filename || "未命名"}`;
                 image.src = url;
                 image.loading = "lazy";
-                const link = element("a", "", "查看原图 ↗");
+                const link = element("a", "", "查看原图");
+                link.append(icon("external-link"));
                 link.href = url;
                 link.target = "_blank";
                 link.rel = "noopener noreferrer";
@@ -1190,11 +1268,9 @@
                         "正式订单已保存。后续改单或撤单需通过新的审核事件记录，不会覆盖原始审核历史。",
                     ),
                 );
-                actions.append(
-                    actionButton("查看正式订单 →", "secondary", () =>
-                        switchView("orders"),
-                    ),
-                );
+                const openOrders = actionButton("查看正式订单", "secondary", () => switchView("orders"));
+                openOrders.append(icon("arrow-right"));
+                actions.append(openOrders);
             } else if (task.status === "rejected") {
                 description.append(
                     element("strong", "", "这条任务已驳回"),
@@ -1587,6 +1663,7 @@
 
     function setTaskBusy(taskId, busy) {
         if (state.selectedId !== taskId) return;
+        for (const id of ["editor-content", "review-form", "task-action-footer"]) setBusy(id, busy);
         for (const node of byId("editor-content").querySelectorAll(
             "input, select, button",
         ))
@@ -1604,7 +1681,7 @@
         const draft = state.drafts.get(taskId);
         byId("confirm-button").disabled =
             busy || (!!task && !!draft && draft.version !== task.version);
-        byId("confirm-button").textContent = busy ? "正在提交…" : "核对并提交";
+        setButtonBusy("confirm-button", busy, "正在处理…");
         updateReviewActions();
     }
 
@@ -1622,7 +1699,7 @@
         byId("confirm-button").hidden = task.status !== "review_required";
         byId("reject-button").hidden = task.status !== "review_required";
         byId("save-candidate-button").disabled = busy || !canEditTask(task) || (conflict && !draft.saveRequest?.uncertain) || !draft.dirty;
-        byId("save-candidate-button").textContent = busy ? "正在保存…" : "保存修正";
+        setButtonBusy("save-candidate-button", busy, "正在保存…");
         byId("cancel-edit-button").disabled = busy;
         const reopen = byId("reopen-button");
         if (reopen) {
@@ -1776,6 +1853,8 @@
         body.idempotency_key = target.request.key;
         const epoch = state.epoch;
         state.operations.add(`task:${target.id}`); setTaskBusy(target.id, true);
+        setBusy("reopen-dialog", true);
+        setButtonBusy("reopen-submit", true, "正在提交复审…");
         byId("reopen-submit").disabled = true; byId("reopen-cancel").disabled = true;
         byId("reopen-actor").disabled = true; byId("reopen-reason").disabled = true;
         try {
@@ -1796,6 +1875,8 @@
         } finally {
             if (epoch !== state.epoch) return;
             state.operations.delete(`task:${target.id}`); setTaskBusy(target.id, false);
+            setBusy("reopen-dialog", false);
+            setButtonBusy("reopen-submit", false);
             byId("reopen-submit").disabled = false; byId("reopen-cancel").disabled = false;
             byId("reopen-actor").disabled = false; byId("reopen-reason").disabled = false;
         }
@@ -1919,6 +2000,9 @@
         byId("confirm-cancel").disabled = true;
         byId("duplicate-confirm").disabled = true;
         byId("duplicate-cancel").disabled = true;
+        for (const id of ["confirm-dialog", "duplicate-dialog"]) setBusy(id, true);
+        setButtonBusy("confirm-submit", true, "正在提交…");
+        setButtonBusy("duplicate-confirm", true, "正在提交…");
         try {
             const result = await request(`/api/tasks/${encodeURIComponent(task.id)}/confirm`, { method: "POST", body });
             if (epoch !== state.epoch) return;
@@ -1945,6 +2029,9 @@
             if (epoch !== state.epoch) return;
             state.operations.delete(`task:${task.id}`);
             setTaskBusy(task.id, false);
+            for (const id of ["confirm-dialog", "duplicate-dialog"]) setBusy(id, false);
+            setButtonBusy("confirm-submit", false);
+            setButtonBusy("duplicate-confirm", false);
             byId("confirm-submit").disabled = false;
             byId("confirm-cancel").disabled = false;
             byId("duplicate-cancel").disabled = false;
@@ -1971,6 +2058,8 @@
         byId("reject-cancel").disabled = true;
         byId("reject-submit").disabled = true;
         setTaskBusy(target.id, true);
+        setBusy("reject-dialog", true);
+        setButtonBusy("reject-submit", true, "正在驳回…");
         try {
             await request(
                 `/api/tasks/${encodeURIComponent(target.id)}/reject`,
@@ -1995,6 +2084,8 @@
             byId("reject-cancel").disabled = false;
             byId("reject-submit").disabled = false;
             setTaskBusy(target.id, false);
+            setBusy("reject-dialog", false);
+            setButtonBusy("reject-submit", false);
         }
     }
 
@@ -2062,7 +2153,8 @@
         );
         state.operations.add("upload");
         byId("upload-submit").disabled = true;
-        byId("upload-submit").textContent = "正在上传…";
+        setBusy("upload-form", true);
+        setButtonBusy("upload-submit", true, "正在上传…");
         byId("upload-error").hidden = true;
         for (const id of [
             "upload-files",
@@ -2105,7 +2197,8 @@
             if (epoch !== state.epoch) return;
             state.operations.delete("upload");
             byId("upload-submit").disabled = false;
-            byId("upload-submit").textContent = "上传并识别";
+            setBusy("upload-form", false);
+            setButtonBusy("upload-submit", false);
             for (const id of [
                 "upload-files",
                 "source-label",
@@ -2222,6 +2315,8 @@
         }
         table.append(body);
         const wrapper = element("div", "orders-table-wrap");
+        wrapper.tabIndex = 0;
+        wrapper.setAttribute("aria-label", "正式订单表格，可横向滚动");
         wrapper.append(table);
         content.append(wrapper);
     }
@@ -2251,6 +2346,7 @@
         const epoch = state.epoch;
         state.operations.add("download");
         byId("download-button").disabled = true;
+        setButtonBusy("download-button", true, "正在下载…");
         try {
             const blob = await request("/api/export/download", { blob: true });
             if (epoch !== state.epoch) return;
@@ -2300,7 +2396,7 @@
             button.dataset.dashboardTaskId = task.id;
             const body = element("span", "task-body");
             body.append(element("strong", "", task.candidate?.events?.[0]?.customer || task.sources?.[0]?.filename || "待审核任务"), element("small", "", `#${shortId(task.id)} · ${localDate(task.created_at)}`));
-            button.append(badge(task.status), body, element("span", "", "→"));
+            button.append(badge(task.status), body, icon("arrow-right"));
             button.addEventListener("click", () => selectTask(task.id));
             content.append(button);
         }
@@ -2366,6 +2462,11 @@
         byId("model-save").disabled = !saved || modelBusy();
         byId("model-reset").disabled = modelBusy();
         byId("model-test").disabled = !saved || modelBusy() || state.modelSettingsDirty || saved.status !== "configured" || !saved.allow_external;
+        const testing = state.operations.has("model-settings") && byId("model-test-dialog").open;
+        setBusy("model-settings-form", modelBusy());
+        setButtonBusy("model-save", state.operations.has("model-settings") && !testing, "正在保存…");
+        setButtonBusy("model-reset", state.modelSettingsLoading, "正在读取…");
+        setButtonBusy("model-test", testing, "正在测试…");
     }
 
     function renderModelSettings() {
@@ -2472,6 +2573,8 @@
         updateModelControls();
         byId("model-test-confirm").disabled = true;
         byId("model-test-cancel").disabled = true;
+        setBusy("model-test-dialog", true);
+        setButtonBusy("model-test-confirm", true, "正在测试…");
         byId("model-test-error").hidden = true;
         try {
             const saved = await request("/api/model-settings/test", { method: "POST", body: { expected_revision: state.modelSettings.revision, confirm_external: true } });
@@ -2489,6 +2592,8 @@
                 state.operations.delete("model-settings");
                 byId("model-test-confirm").disabled = false;
                 byId("model-test-cancel").disabled = false;
+                setBusy("model-test-dialog", false);
+                setButtonBusy("model-test-confirm", false);
                 updateModelControls();
             }
         }
@@ -2721,7 +2826,7 @@
             if (dialog.id === "reopen-dialog") state.reopenTarget = null;
             if (dialog.id === "duplicate-dialog") state.duplicate = null;
             if (dialog.id === "order-history-dialog") state.historyGeneration += 1;
-            if (target?.isConnected && !target.disabled && !document.querySelector("dialog[open]") && state.token) target.focus();
+            restoreDialogFocus(target);
         });
     }
     for (const id of ["history-close", "history-done"]) byId(id).addEventListener("click", () => closeDialog("order-history-dialog"));
@@ -2729,13 +2834,16 @@
     byId("download-button").addEventListener("click", downloadExport);
     document.addEventListener("keydown", trapDialogFocus, true);
     document.addEventListener("keydown", (event) => {
-        if (document.querySelector("dialog[open]") || !state.token) return;
-        const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName);
-        if (state.view === "review" && state.reviewDetail && event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+        if (event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
+            document.querySelector("dialog[open]") || !state.token) return;
+        const editing = event.target?.isContentEditable || event.target?.closest?.(
+            'input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]',
+        );
+        if (state.view === "review" && state.reviewDetail && !editing && event.altKey && !event.ctrlKey && !event.metaKey && ["ArrowUp", "ArrowDown"].includes(event.key)) {
             event.preventDefault(); navigateTask(event.key === "ArrowUp" ? -1 : 1);
         } else if (state.view === "review" && state.reviewDetail && event.key === "Escape" && !editing) {
             event.preventDefault(); showQueue();
-        } else if (event.key === "/" && !editing && ["review", "orders"].includes(state.view)) {
+        } else if (event.key === "/" && !editing && !event.altKey && !event.ctrlKey && !event.metaKey && ["review", "orders"].includes(state.view)) {
             event.preventDefault();
             if (state.view === "review") showQueue();
             byId(state.view === "review" ? "queue-search" : "order-search").focus();

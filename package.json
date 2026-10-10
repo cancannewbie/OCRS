@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test:frontend": "node --test tests/frontend/auth-security.test.cjs tests/frontend/review-mutations.test.cjs tests/frontend/upload-navigation.test.cjs",
+    "test:frontend": "node --test tests/frontend/auth-security.test.cjs tests/frontend/review-mutations.test.cjs tests/frontend/upload-navigation.test.cjs tests/frontend/ui-interactions.test.cjs",
     "test:e2e": "playwright test"
   },
   "devDependencies": {
