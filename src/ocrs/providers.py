@@ -141,6 +141,7 @@ class OpenAICompatibleProvider:
     name = "openai-compatible"
     prompt_version = "ocrs-recognition-v1"
     _transient_statuses = frozenset({408, 429, 500, 502, 503, 504})
+    _image_detail = "auto"
     _allowed_mimes = frozenset({"image/png", "image/jpeg", "image/webp"})
 
     def __init__(
@@ -286,6 +287,7 @@ class OpenAICompatibleProvider:
             "n": 1,
             "stream": False,
         }
+        payload = self._prepare_payload(payload)
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not self._semaphore.acquire(timeout=remaining):
             raise ProviderError("provider_deadline")
@@ -293,6 +295,12 @@ class OpenAICompatibleProvider:
             return self._request(payload, sources, deadline)
         finally:
             self._semaphore.release()
+
+    def _prepare_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return payload
+
+    def _validate_envelope(self, response: Any) -> None:
+        pass
 
     def _image_content(self, sources: list[RecognitionSource]) -> list[dict[str, Any]]:
         content: list[dict[str, Any]] = []
@@ -318,7 +326,7 @@ class OpenAICompatibleProvider:
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:{source.mime};base64,{encoded}",
-                            "detail": "auto",
+                            "detail": self._image_detail,
                         },
                     },
                 ]
@@ -419,6 +427,7 @@ class OpenAICompatibleProvider:
     def _parse_response(self, body: bytes, sources: list[RecognitionSource]) -> Candidate:
         try:
             response = _load_json(body)
+            self._validate_envelope(response)
             choices = response["choices"]
             if not isinstance(choices, list) or len(choices) != 1:
                 raise ValueError("invalid_choices")
@@ -455,3 +464,47 @@ class OpenAICompatibleProvider:
         ):
             # Pydantic messages can contain source text. Do not chain or log them.
             raise ProviderError("provider_schema_invalid") from None
+
+
+class MiniMaxCNProvider(OpenAICompatibleProvider):
+    """Explicit MiniMax CN M3 contract; JSON is enforced locally, not by the API.
+
+    Only the documented M3 vision contract is enabled. M2 is text-only and the
+    M3.1 preview has separate availability/thinking constraints. Never silently
+    route a CN credential to another endpoint or retry with a weaker contract.
+    """
+
+    name = "minimax-cn"
+    prompt_version = "ocrs-minimax-cn-v1"
+    _image_detail = "default"
+
+    def __init__(self, *, base_url: str, model: str, api_key: str, **kwargs: Any) -> None:
+        if not isinstance(base_url, str) or base_url.rstrip("/") != "https://api.minimax.cn/v1":
+            raise ProviderError("provider_config_base_url")
+        if model != "MiniMax-M3":
+            raise ProviderError("provider_config_model")
+        super().__init__(base_url=base_url, model=model, api_key=api_key, **kwargs)
+
+    def _prepare_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        schema = payload.pop("response_format")["json_schema"]["schema"]
+        payload["messages"][0]["content"] += (
+            " Return exactly one JSON object, without Markdown fences or commentary. "
+            "Follow this JSON Schema: " + json.dumps(schema, ensure_ascii=False)
+        )
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
+        payload.pop("n")
+        payload["reasoning_split"] = True
+        payload["thinking"] = {"type": "disabled"}
+        return payload
+
+    def _validate_envelope(self, response: Any) -> None:
+        if not isinstance(response, dict):
+            raise ValueError("invalid_response")
+        status = response.get("base_resp")
+        if status is not None:
+            if not isinstance(status, dict) or type(status.get("status_code")) is not int:
+                raise ValueError("invalid_status")
+            if status["status_code"] != 0:
+                raise ProviderError("provider_api_rejected")
+        if response.get("input_sensitive") or response.get("output_sensitive"):
+            raise ProviderError("provider_refused")
